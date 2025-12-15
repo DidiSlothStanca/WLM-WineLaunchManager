@@ -5,7 +5,7 @@ Wine Launch Manager (WLM) is a Python3-based application for managing Vanilla Wi
 ---
 
 ## Screenshot
-![Screenshot WLM](./1.jpg)
+![Screenshot WLM](WLM_SS/2.png)
 ---
 
 ## How to Use WLM?
@@ -49,8 +49,8 @@ sudo apt install python3-tk python3-pil python3-pil.imagetk
 
 ---
 
-## WLM Menu
-![Screenshot WLM](./5.jpg)
+## WLM Menu & Theme
+![Screenshot WLM](WLM_SS/1.png)
 ---
 
 ## Features:
@@ -67,15 +67,17 @@ sudo apt install python3-tk python3-pil python3-pil.imagetk
 3. **Remove Button**: Deletes an application from the shortcut list.
 4. **Add Button**: Adds an application to the shortcut list menu (.exe file).
 5. **Change Icon Button**: Changes the launcher icon (\*.ico, \*.png).
-6. **Winecfg Button**: Opens the Wine Vanilla configuration.
-7. **Launch Mode Button**: For Counter FPS using GalliumHUD & Mangohud (GL or VK)
+6. **Launch Mode Button**: For Counter FPS using GalliumHUD & Mangohud (GL or VK)
 
 ## WLM Settings
-![Screenshot WLM](./7.jpg)
+![Screenshot WLM](WLM_SS/5.png)
 ### **Settings Menu:**
 
+- **Winecfg Button**: Opens the Wine Vanilla configuration.
+- **Open Wine Prefix Folder**: Opens Wine Prefix Folder.
 - **Uninstaller**: Uninstalls programs installed within Wine.
-- **Explorer**: Opens the file manager or explorer inside Wine.
+- **Wine Explorer**: Opens the file manager or explorer inside Wine.
+- **Refresh**: Just Refresh.
 
 ---
 
