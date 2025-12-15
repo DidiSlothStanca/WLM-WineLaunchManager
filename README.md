@@ -59,7 +59,7 @@ sudo apk add python3 py3-tkinter py3-pillow
 2. Open a terminal in the directory where the file has been downloaded (e.g., `~/Downloads`).
 3. Extract the archive and move it to your home directory:
    ```bash
-   tar -xf wlm.tar.gz -C ~/
+   tar -xf WLM_version.tar.gz -C ~/
    ```
 4. Navigate to the WLM directory:
    ```bash
