@@ -81,7 +81,6 @@ sudo apk add python3 py3-tkinter py3-pillow
 ## Features:
 
 - Manage Vanilla Wine applications via a user-friendly GUI.
-- Integrate Winetricks for additional Wine configurations.
 - Uninstall applications installed within Wine.
 - Display FPS using GalliumHUD or MangoHUD.
 - Create and manage shortcut lists in the Launcher.
