@@ -1,0 +1,11 @@
+{
+    "Application-x64": {
+        "runner": "protonge",
+        "proton_name": "GE-Proton11-6-x86_64",
+        "proton_path": "/home/didi/wlm/protonge/GE-Proton11-6-x86_64/proton",
+        "prefix_code": "GAME001",
+        "prefix_path": "/home/didi/wlm/protonprefixes/GAME001",
+        "launch_options": "PROTON_USE_WINED3D=1",
+        "comment": ""
+    }
+}
