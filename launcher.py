@@ -2,12 +2,18 @@ import os
 import re
 import shlex
 import subprocess
+import threading
+import queue
+import pty
+import select
+import errno
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog, messagebox
 from pathlib import Path
 from PIL import Image, ImageTk, ImageDraw
 import json
 from datetime import datetime
+import time
 
 # Configuration paths
 directory = Path.home() / "wlm"
@@ -19,14 +25,34 @@ window_config_file = directory / "window_config.json"
 # ProtonGE feature paths
 protonge_dir = directory / "protonge"                 # tempat ekstrak binary Proton GE (bukan di direktori Steam)
 protonge_prefix_root = directory / "protonprefixes"   # prefix ProtonGE dibuat di sini (didalam direktori utama)
-runner_config_file = directory / "runner_config.json"  # menyimpan pilihan runner (wine/protonge) per game
 
-# Create directories if they don't exist
+# Proton-CachyOS feature paths (sama pola dengan Proton GE, tapi folder ekstrak & prefix terpisah)
+protoncachyos_dir = directory / "protoncachyos"                    # tempat ekstrak binary Proton-CachyOS
+protoncachyos_prefix_root = directory / "protoncachyosprefixes"    # prefix Proton-CachyOS dibuat disini, terpisah dari Proton GE
+
+runner_config_file = directory / "runner_config.json"  # menyimpan pilihan runner (wine/protonge/protoncachyos) per game
+logs_dir = directory / "logs"                          # menyimpan output stdout/stderr wine & proton per game
+
+# Buat direktori jika tidak ada.
 directory.mkdir(parents=True, exist_ok=True)
 bashlaunch_dir.mkdir(parents=True, exist_ok=True)
 icon_dir.mkdir(parents=True, exist_ok=True)
 protonge_dir.mkdir(parents=True, exist_ok=True)
 protonge_prefix_root.mkdir(parents=True, exist_ok=True)
+protoncachyos_dir.mkdir(parents=True, exist_ok=True)
+protoncachyos_prefix_root.mkdir(parents=True, exist_ok=True)
+logs_dir.mkdir(parents=True, exist_ok=True)
+
+# =======================================================================
+# Live log
+# =======================================================================
+# script_name (no .sh) -> {
+#   "proc": Popen, "log_path": Path, "queue": queue.Queue,
+#   "buffer": [str, ...], "window": Toplevel|None, "text_widget": Text|None,
+#   "finished": bool
+# }
+running_games = {}
+MAX_LOG_BUFFER_LINES = 5000
 
 # =======================================================================
 # THEME SYSTEM & CONFIG
@@ -163,7 +189,7 @@ ICON_HEIGHT = ICON_SIZE
 # =======================================================================
 def load_config():
     """Load all configurations from file with validation"""
-    config = {"theme": "default", "window_size": "1000x650", "window_position": None}
+    config = {"theme": "default", "window_size": "1000x720", "window_position": None}
     
     # Load theme config
     if theme_config_file.exists():
@@ -180,7 +206,7 @@ def load_config():
             with open(window_config_file, 'r') as f:
                 window_config = json.load(f)
                 
-                loaded_size = window_config.get('size', '1000x650')
+                loaded_size = window_config.get('size', '1000x720')
                 loaded_position = window_config.get('position', None)
 
                 # Validate Size format (WxH)
@@ -229,17 +255,26 @@ def save_window_config():
 # =======================================================================
 # PROTON GE FEATURE (RUNNER: WINE VANILLA / PROTON GE)
 # =======================================================================
-def find_protonge_installations():
-    """Scan Proton GE yang sudah diekstrak didalam direktori utama WLM (~/wlm/protonge).
-    Tidak lagi membaca dari direktori Steam."""
+def find_proton_installations(base_dir):
+    """Scan build Proton (GE atau CachyOS) yang sudah diekstrak didalam sebuah folder.
+    Tidak membaca dari direktori Steam."""
     found = []
-    if protonge_dir.is_dir():
-        for entry in sorted(protonge_dir.iterdir(), reverse=True):
+    if base_dir.is_dir():
+        for entry in sorted(base_dir.iterdir(), reverse=True):
             if entry.is_dir():
                 proton_bin = entry / "proton"
                 if proton_bin.exists():
                     found.append((entry.name, proton_bin))
     return found
+
+def find_protonge_installations():
+    """Scan Proton GE yang sudah diekstrak didalam direktori utama WLM (~/wlm/protonge).
+    Tidak lagi membaca dari direktori Steam."""
+    return find_proton_installations(protonge_dir)
+
+def find_protoncachyos_installations():
+    """Scan Proton-CachyOS yang sudah diekstrak didalam direktori utama WLM (~/wlm/protoncachyos)."""
+    return find_proton_installations(protoncachyos_dir)
 
 def find_steam_install_path():
     """Cari direktori client Steam (opsional, hanya untuk STEAM_COMPAT_CLIENT_INSTALL_PATH).
@@ -257,11 +292,12 @@ def find_steam_install_path():
     fallback.mkdir(exist_ok=True)
     return fallback
 
-def extract_protonge_archive():
-    """Pilih arsip Proton GE (.tar.gz/.tar.xz/.tgz/.zip) lalu ekstrak ke ~/wlm/protonge/."""
+def extract_proton_archive(target_dir, build_label):
+    """Pilih arsip Proton (.tar.gz/.tar.xz/.tgz/.zip) lalu ekstrak ke target_dir.
+    Dipakai bersama oleh Proton GE dan Proton-CachyOS."""
     archive_path = filedialog.askopenfilename(
-        title="Pilih Arsip Proton GE",
-        filetypes=[("Proton GE Archive", "*.tar.gz *.tar.xz *.tgz *.zip"), ("All Files", "*.*")]
+        title=f"Pilih Arsip {build_label}",
+        filetypes=[(f"{build_label} Archive", "*.tar.gz *.tar.xz *.tgz *.zip"), ("All Files", "*.*")]
     )
     if not archive_path:
         return
@@ -271,23 +307,23 @@ def extract_protonge_archive():
     root.update_idletasks()
 
     try:
-        protonge_dir.mkdir(exist_ok=True)
-        before_entries = {p.name for p in protonge_dir.iterdir() if p.is_dir()}
+        target_dir.mkdir(exist_ok=True)
+        before_entries = {p.name for p in target_dir.iterdir() if p.is_dir()}
 
         if archive_path_obj.suffix.lower() == ".zip":
             import zipfile
             with zipfile.ZipFile(archive_path, 'r') as zf:
                 top_level_names = {Path(n).parts[0] for n in zf.namelist() if n.strip()}
-                zf.extractall(protonge_dir)
+                zf.extractall(target_dir)
         else:
             import tarfile
             with tarfile.open(archive_path, 'r:*') as tf:
                 top_level_names = {Path(n).parts[0] for n in tf.getnames() if n.strip()}
                 try:
-                    tf.extractall(protonge_dir, filter='data')
+                    tf.extractall(target_dir, filter='data')
                 except TypeError:
                     # Python versi lama belum mendukung parameter 'filter'
-                    tf.extractall(protonge_dir)
+                    tf.extractall(target_dir)
 
         new_top_names = top_level_names - before_entries
 
@@ -296,32 +332,50 @@ def extract_protonge_archive():
         if len(new_top_names) != 1:
             wrapper_name = archive_path_obj.name.replace(".tar.gz", "").replace(".tar.xz", "") \
                                                  .replace(".tgz", "").replace(".zip", "")
-            wrapper_dir = protonge_dir / wrapper_name
+            wrapper_dir = target_dir / wrapper_name
             wrapper_dir.mkdir(exist_ok=True)
             for name in new_top_names:
-                src = protonge_dir / name
+                src = target_dir / name
                 if src.exists() and src != wrapper_dir:
                     src.rename(wrapper_dir / name)
 
-        status_label.config(text=f"Proton GE berhasil diekstrak ke {protonge_dir}", fg=COLORS["success"])
-        messagebox.showinfo("Selesai", f"Proton GE berhasil diekstrak ke direktori WLM:\n{protonge_dir}")
+        status_label.config(text=f"{build_label} berhasil diekstrak ke {target_dir}", fg=COLORS["success"])
+        messagebox.showinfo("Selesai", f"{build_label} berhasil diekstrak ke direktori WLM:\n{target_dir}")
     except Exception as e:
-        status_label.config(text=f"Error mengekstrak Proton GE: {str(e)}", fg=COLORS["danger"])
+        status_label.config(text=f"Error mengekstrak {build_label}: {str(e)}", fg=COLORS["danger"])
         messagebox.showerror("Error", f"Gagal mengekstrak arsip:\n{str(e)}")
+
+def extract_protonge_archive():
+    """Pilih arsip Proton GE (.tar.gz/.tar.xz/.tgz/.zip) lalu ekstrak ke ~/wlm/protonge/."""
+    extract_proton_archive(protonge_dir, "Proton GE")
+
+def extract_protoncachyos_archive():
+    """Pilih arsip Proton-CachyOS (.tar.gz/.tar.xz/.tgz/.zip) lalu ekstrak ke ~/wlm/protoncachyos/."""
+    extract_proton_archive(protoncachyos_dir, "Proton-CachyOS")
+
+def open_proton_folder(target_dir, build_label):
+    """Buka folder tempat sebuah build Proton diekstrak."""
+    try:
+        target_dir.mkdir(exist_ok=True)
+        subprocess.Popen(["xdg-open", str(target_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        status_label.config(text=f"Opening {build_label} Folder...", fg=COLORS["text_secondary"])
+    except Exception as e:
+        status_label.config(text=f"Error opening {build_label} folder: {str(e)}", fg=COLORS["danger"])
 
 def open_protonge_folder():
     """Buka folder tempat Proton GE diekstrak (~/wlm/protonge)."""
-    try:
-        protonge_dir.mkdir(exist_ok=True)
-        subprocess.Popen(["xdg-open", str(protonge_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        status_label.config(text="Opening Proton GE Folder...", fg=COLORS["text_secondary"])
-    except Exception as e:
-        status_label.config(text=f"Error opening Proton GE folder: {str(e)}", fg=COLORS["danger"])
+    open_proton_folder(protonge_dir, "Proton GE")
 
-def generate_next_prefix_code():
-    """Generate kode prefix baru secara berurutan (GAME001, GAME002, ...) sesuai urutan installer dijalankan."""
+def open_protoncachyos_folder():
+    """Buka folder tempat Proton-CachyOS diekstrak (~/wlm/protoncachyos)."""
+    open_proton_folder(protoncachyos_dir, "Proton-CachyOS")
+
+def generate_next_prefix_code(prefix_root):
+    """Generate kode prefix baru secara berurutan (GAME001, GAME002, ...) didalam prefix_root
+    yang diberikan, sesuai urutan installer dijalankan. Setiap runner (Proton GE / Proton-CachyOS)
+    punya prefix_root sendiri sehingga penomoran tidak saling bentrok."""
     numbers = []
-    for entry in protonge_prefix_root.iterdir():
+    for entry in prefix_root.iterdir():
         if entry.is_dir() and entry.name.startswith("GAME") and entry.name[4:].isdigit():
             numbers.append(int(entry.name[4:]))
     next_num = max(numbers, default=0) + 1
@@ -431,7 +485,7 @@ def build_script_content(folder_path, exe_path, choice):
 
     extra_args_str = (" " + " ".join(shlex.quote(a) for a in extra_args)) if extra_args else ""
 
-    if choice["runner"] == "protonge":
+    if choice["runner"] in ("protonge", "protoncachyos"):
         lines.append(f'export STEAM_COMPAT_DATA_PATH="{choice["prefix_path"]}"')
         lines.append(f'export STEAM_COMPAT_CLIENT_INSTALL_PATH="{find_steam_install_path()}"')
         lines.append(f'"{choice["proton_path"]}" run "{exe_path}"{extra_args_str}')
@@ -449,6 +503,7 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
     Return dict pilihan, atau None jika dibatalkan.
     """
     protonge_list = find_protonge_installations()
+    protoncachyos_list = find_protoncachyos_installations()
 
     existing_cfg = None
     if parent_script_name:
@@ -469,46 +524,83 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
     ttk.Label(frame, text="Pilih compatibility layer untuk menjalankan game:",
               font=FONTS["normal"]).pack(anchor="w", pady=(0, 10))
 
-    default_runner = "protonge" if (existing_cfg and existing_cfg.get("runner") == "protonge") else "wine"
+    existing_runner = existing_cfg.get("runner") if existing_cfg else None
+    default_runner = existing_runner if existing_runner in ("protonge", "protoncachyos") else "wine"
     runner_var = tk.StringVar(value=default_runner)
 
     ttk.Radiobutton(frame, text="Wine (Vanilla)", variable=runner_var, value="wine").pack(anchor="w", pady=2)
     protonge_radio = ttk.Radiobutton(frame, text="Proton GE", variable=runner_var, value="protonge")
     protonge_radio.pack(anchor="w", pady=2)
+    protoncachyos_radio = ttk.Radiobutton(frame, text="Proton-CachyOS", variable=runner_var, value="protoncachyos")
+    protoncachyos_radio.pack(anchor="w", pady=2)
 
-    version_label = ttk.Label(frame, text="Versi Proton GE:", font=FONTS["small"])
-    version_combo = ttk.Combobox(frame, state="readonly", width=32, font=FONTS["small"])
+    # --- Widget grup untuk Proton GE ---
+    protonge_version_label = ttk.Label(frame, text="Versi Proton GE:", font=FONTS["small"])
+    protonge_version_combo = ttk.Combobox(frame, state="readonly", width=32, font=FONTS["small"])
 
     if protonge_list:
-        version_combo["values"] = [name for name, _ in protonge_list]
+        protonge_version_combo["values"] = [name for name, _ in protonge_list]
         default_idx = 0
-        if existing_cfg and existing_cfg.get("proton_name") in version_combo["values"]:
-            default_idx = list(version_combo["values"]).index(existing_cfg["proton_name"])
-        version_combo.current(default_idx)
+        if existing_cfg and existing_cfg.get("runner") == "protonge" and existing_cfg.get("proton_name") in protonge_version_combo["values"]:
+            default_idx = list(protonge_version_combo["values"]).index(existing_cfg["proton_name"])
+        protonge_version_combo.current(default_idx)
     else:
-        version_combo["values"] = ["(Belum ada - Extract di menu Settings)"]
-        version_combo.current(0)
+        protonge_version_combo["values"] = ["(Belum ada - Extract di menu Settings)"]
+        protonge_version_combo.current(0)
         protonge_radio.config(state="disabled")
 
-    prefix_info_var = tk.StringVar()
+    protonge_prefix_info_var = tk.StringVar()
     if existing_cfg and existing_cfg.get("runner") == "protonge" and existing_cfg.get("prefix_code"):
-        prefix_info_var.set(f"Prefix: {existing_cfg.get('prefix_code')} (dipakai sebelumnya, konsisten)")
+        protonge_prefix_info_var.set(f"Prefix: {existing_cfg.get('prefix_code')} (dipakai sebelumnya, konsisten)")
     else:
-        prefix_info_var.set("Prefix baru akan dibuat otomatis di direktori utama")
-    prefix_label = ttk.Label(frame, textvariable=prefix_info_var, font=FONTS["small"])
+        protonge_prefix_info_var.set("Prefix baru akan dibuat otomatis di direktori utama")
+    protonge_prefix_label = ttk.Label(frame, textvariable=protonge_prefix_info_var, font=FONTS["small"])
 
-    def toggle_protonge_widgets(*_):
-        if runner_var.get() == "protonge":
-            version_label.pack(anchor="w", pady=(10, 2))
-            version_combo.pack(anchor="w", pady=(0, 2))
-            prefix_label.pack(anchor="w", pady=(2, 10))
-        else:
-            version_label.pack_forget()
-            version_combo.pack_forget()
-            prefix_label.pack_forget()
+    # --- Widget grup untuk Proton-CachyOS ---
+    cachyos_version_label = ttk.Label(frame, text="Versi Proton-CachyOS:", font=FONTS["small"])
+    cachyos_version_combo = ttk.Combobox(frame, state="readonly", width=32, font=FONTS["small"])
 
-    runner_var.trace_add("write", toggle_protonge_widgets)
-    toggle_protonge_widgets()
+    if protoncachyos_list:
+        cachyos_version_combo["values"] = [name for name, _ in protoncachyos_list]
+        default_idx = 0
+        if existing_cfg and existing_cfg.get("runner") == "protoncachyos" and existing_cfg.get("proton_name") in cachyos_version_combo["values"]:
+            default_idx = list(cachyos_version_combo["values"]).index(existing_cfg["proton_name"])
+        cachyos_version_combo.current(default_idx)
+    else:
+        cachyos_version_combo["values"] = ["(Belum ada - Extract di menu Settings)"]
+        cachyos_version_combo.current(0)
+        protoncachyos_radio.config(state="disabled")
+
+    cachyos_prefix_info_var = tk.StringVar()
+    if existing_cfg and existing_cfg.get("runner") == "protoncachyos" and existing_cfg.get("prefix_code"):
+        cachyos_prefix_info_var.set(f"Prefix: {existing_cfg.get('prefix_code')} (dipakai sebelumnya, konsisten)")
+    else:
+        cachyos_prefix_info_var.set("Prefix baru akan dibuat otomatis di direktori utama")
+    cachyos_prefix_label = ttk.Label(frame, textvariable=cachyos_prefix_info_var, font=FONTS["small"])
+
+    def toggle_runner_widgets(*_):
+        chosen = runner_var.get()
+
+        # Sembunyikan dulu semua widget grup runner Proton, baru tampilkan yang relevan,
+        # supaya tidak ada widget grup lain yang menumpuk saat berpindah pilihan.
+        protonge_version_label.pack_forget()
+        protonge_version_combo.pack_forget()
+        protonge_prefix_label.pack_forget()
+        cachyos_version_label.pack_forget()
+        cachyos_version_combo.pack_forget()
+        cachyos_prefix_label.pack_forget()
+
+        if chosen == "protonge":
+            protonge_version_label.pack(anchor="w", pady=(10, 2))
+            protonge_version_combo.pack(anchor="w", pady=(0, 2))
+            protonge_prefix_label.pack(anchor="w", pady=(2, 10))
+        elif chosen == "protoncachyos":
+            cachyos_version_label.pack(anchor="w", pady=(10, 2))
+            cachyos_version_combo.pack(anchor="w", pady=(0, 2))
+            cachyos_prefix_label.pack(anchor="w", pady=(2, 10))
+
+    runner_var.trace_add("write", toggle_runner_widgets)
+    toggle_runner_widgets()
 
     ttk.Separator(frame, orient="horizontal").pack(fill=tk.X, pady=(5, 10))
 
@@ -545,23 +637,34 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
             dialog.destroy()
             return
 
-        if not protonge_list:
-            messagebox.showerror("Error", "Proton GE tidak ditemukan. Extract dulu lewat menu Settings.")
+        if chosen == "protonge":
+            build_list = protonge_list
+            version_combo = protonge_version_combo
+            prefix_root = protonge_prefix_root
+            build_label = "Proton GE"
+        else:  # protoncachyos
+            build_list = protoncachyos_list
+            version_combo = cachyos_version_combo
+            prefix_root = protoncachyos_prefix_root
+            build_label = "Proton-CachyOS"
+
+        if not build_list:
+            messagebox.showerror("Error", f"{build_label} tidak ditemukan. Extract dulu lewat menu Settings.")
             return
 
         idx = version_combo.current()
-        proton_name, proton_path = protonge_list[idx]
+        proton_name, proton_path = build_list[idx]
 
-        if existing_cfg and existing_cfg.get("runner") == "protonge" and existing_cfg.get("prefix_code"):
+        if existing_cfg and existing_cfg.get("runner") == chosen and existing_cfg.get("prefix_code"):
             prefix_code = existing_cfg["prefix_code"]
         else:
-            prefix_code = generate_next_prefix_code()
+            prefix_code = generate_next_prefix_code(prefix_root)
 
-        prefix_path = protonge_prefix_root / prefix_code
+        prefix_path = prefix_root / prefix_code
         prefix_path.mkdir(parents=True, exist_ok=True)
 
         result["value"] = {
-            "runner": "protonge",
+            "runner": chosen,
             "proton_name": proton_name,
             "proton_path": str(proton_path),
             "prefix_code": prefix_code,
@@ -753,6 +856,180 @@ def update_script_list(sort_order="ascending"):
         icon_label.image = None
         info_text.set("Select a game to view details")
 
+# =======================================================================
+# Log streaming sedara real time.
+# =======================================================================
+ANSI_ESCAPE_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+def stream_output(script_name_only, proc, master_fd, log_path):
+    """Berjalan pada thread latar belakang dan juga menggabungkan stdout dan stderr dari proses game dan menampilkannya
+    secara langsung/ real time"""
+    entry = running_games.get(script_name_only)
+    try:
+        with open(log_path, "w", encoding="utf-8", errors="replace") as log_f:
+            while True:
+                try:
+                    ready, _, _ = select.select([master_fd], [], [], 0.25)
+                except OSError:
+                    break
+
+                if master_fd in ready:
+                    try:
+                        data = os.read(master_fd, 4096)
+                    except OSError as e:
+                        if e.errno == errno.EIO:
+                            break
+                        raise
+                    if not data:
+                        break
+                    text = ANSI_ESCAPE_RE.sub('', data.decode("utf-8", errors="replace"))
+                    text = text.replace("\r\n", "\n").replace("\r", "\n")
+                    log_f.write(text)
+                    log_f.flush()
+                    if entry:
+                        entry["queue"].put(text)
+
+                if proc.poll() is not None and not ready:
+                    break
+    except Exception as e:
+        if entry:
+            entry["queue"].put(f"\n[launcher] Error reading process output: {e}\n")
+    finally:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        proc.wait()
+        if entry:
+            entry["queue"].put(f"\n[launcher] Process exited (code {proc.returncode}).\n")
+            entry["finished"] = True
+
+def poll_log_queues():
+    """Runs periodically on the GUI thread (via root.after). Drains any
+    pending output for every tracked game and, if that game's log window
+    is currently open, appends the new lines to its Text widget."""
+    for script_name_only, entry in list(running_games.items()):
+        new_lines = []
+        try:
+            while True:
+                new_lines.append(entry["queue"].get_nowait())
+        except queue.Empty:
+            pass
+
+        if new_lines:
+            entry["buffer"].extend(new_lines)
+            if len(entry["buffer"]) > MAX_LOG_BUFFER_LINES:
+                entry["buffer"] = entry["buffer"][-MAX_LOG_BUFFER_LINES:]
+
+            text_widget = entry.get("text_widget")
+            if text_widget and text_widget.winfo_exists():
+                was_at_bottom = text_widget.yview()[1] >= 0.999
+                text_widget.config(state="normal")
+                text_widget.insert(tk.END, "".join(new_lines))
+                text_widget.config(state="disabled")
+                if was_at_bottom:
+                    text_widget.see(tk.END)
+
+            status_label_widget = entry.get("status_label")
+            if entry["finished"] and status_label_widget and status_label_widget.winfo_exists():
+                status_label_widget.config(text="⚪ Finished", fg=COLORS["text_secondary"])
+
+    root.after(150, poll_log_queues)
+
+def open_log_window(script_name_only):
+    """Open (or focus, if already open) a real-time log viewer window
+    for the given game. Works both while the game is running (live tail)
+    and afterwards (shows the last saved log file)."""
+    entry = running_games.get(script_name_only)
+    log_path = logs_dir / f"{script_name_only}.log"
+
+    if entry and entry.get("window") is not None and entry["window"].winfo_exists():
+        entry["window"].lift()
+        entry["window"].focus_force()
+        return
+
+    win = tk.Toplevel(root)
+    win.title(f"Logs - {script_name_only}")
+    win.configure(bg=COLORS["primary"])
+    win.geometry("800x500")
+    win.minsize(400, 250)
+
+    top_bar = ttk.Frame(win, padding=(10, 8))
+    top_bar.pack(fill=tk.X)
+
+    ttk.Label(top_bar, text=script_name_only, font=FONTS["subtitle"]).pack(side=tk.LEFT)
+
+    is_live = bool(entry and not entry.get("finished"))
+    state_text = "🟢 Running (live)" if is_live else "⚪ Not running (last saved log)"
+    state_color = COLORS["success"] if is_live else COLORS["text_secondary"]
+    run_state_label = tk.Label(top_bar, text=state_text, font=FONTS["small"], fg=state_color)
+    run_state_label.pack(side=tk.RIGHT)
+
+    text_frame = ttk.Frame(win)
+    text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+    text_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL)
+    text_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    text_widget = tk.Text(text_frame, wrap=tk.NONE, state="disabled",
+                           bg=COLORS["text_background"], fg=COLORS["text"],
+                           insertbackground=COLORS["text"], font=("Courier", 9),
+                           yscrollcommand=text_scroll.set)
+    text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    text_scroll.config(command=text_widget.yview)
+
+    def insert_initial(content):
+        text_widget.config(state="normal")
+        text_widget.insert(tk.END, content)
+        text_widget.config(state="disabled")
+        text_widget.see(tk.END)
+
+    if entry:
+        insert_initial("".join(entry["buffer"]) if entry["buffer"] else "(waiting for output...)\n")
+        entry["window"] = win
+        entry["text_widget"] = text_widget
+        entry["status_label"] = run_state_label
+    elif log_path.exists():
+        try:
+            insert_initial(log_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception as e:
+            insert_initial(f"[launcher] Could not read log file: {e}\n")
+    else:
+        insert_initial("(No logs yet - launch this game at least once first)\n")
+
+    def on_close():
+        if entry:
+            entry["window"] = None
+            entry["text_widget"] = None
+            entry["status_label"] = None
+        win.destroy()
+    win.protocol("WM_DELETE_WINDOW", on_close)
+
+    bottom_bar = ttk.Frame(win, padding=(10, 0, 10, 10))
+    bottom_bar.pack(fill=tk.X)
+
+    def clear_view():
+        text_widget.config(state="normal")
+        text_widget.delete("1.0", tk.END)
+        text_widget.config(state="disabled")
+
+    ttk.Button(bottom_bar, text="Clear View", command=clear_view).pack(side=tk.LEFT)
+    ttk.Button(bottom_bar, text="Open Log File",
+               command=lambda: subprocess.Popen(["xdg-open", str(log_path)],
+                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+               if log_path.exists() else messagebox.showinfo("Info", "No log file yet")
+               ).pack(side=tk.LEFT, padx=(8, 0))
+
+def view_logs():
+    """Handler for the LOGS button - shows the live/last log for whichever
+    game is currently selected in the tree."""
+    selected = tree.focus()
+    if not selected:
+        messagebox.showinfo("Info", "Please select a game first")
+        return
+    script_name_only = tree.item(selected, "values")[1]
+    open_log_window(script_name_only)
+
 def run_script():
     """Run the selected script"""
     selected = tree.focus()
@@ -811,11 +1088,36 @@ def run_script():
     }
     
     command = commands.get(launch_mode, commands["Normal"])
-    
+    log_path = logs_dir / f"{script_name_only}.log"
+
     try:
-        # Use Popen to run in the background and prevent GUI blocking
-        subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        runner_label = f"Proton GE ({choice['prefix_code']})" if choice["runner"] == "protonge" else "Wine"
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(command,
+                                 stdout=slave_fd,
+                                 stderr=slave_fd,
+                                 stdin=slave_fd,
+                                 close_fds=True,
+                                 start_new_session=True)
+        os.close(slave_fd)
+
+        running_games[script_name_only] = {
+            "proc": proc,
+            "log_path": log_path,
+            "queue": queue.Queue(),
+            "buffer": [],
+            "window": None,
+            "text_widget": None,
+            "status_label": None,
+            "finished": False,
+        }
+        threading.Thread(target=stream_output, args=(script_name_only, proc, master_fd, log_path), daemon=True).start()
+
+        if choice["runner"] == "protonge":
+            runner_label = f"Proton GE ({choice['prefix_code']})"
+        elif choice["runner"] == "protoncachyos":
+            runner_label = f"Proton-CachyOS ({choice['prefix_code']})"
+        else:
+            runner_label = "Wine"
         status_label.config(text=f"Launching {script_name[:-3]} via {runner_label} in {launch_mode} mode...", fg=COLORS["success"])
     except FileNotFoundError:
         messagebox.showerror("Error", f"Launcher command not found. Do you have the necessary tools installed?")
@@ -1166,13 +1468,14 @@ def run_exe_setup():
         for key, val in env_vars:
             env[key] = val
 
-        if choice["runner"] == "protonge":
+        if choice["runner"] in ("protonge", "protoncachyos"):
             env["STEAM_COMPAT_DATA_PATH"] = choice["prefix_path"]
             env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(find_steam_install_path())
             command = [choice["proton_path"], "run", exe_path] + extra_args
             subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            runner_label = "Proton GE" if choice["runner"] == "protonge" else "Proton-CachyOS"
             status_label.config(
-                text=f"Running setup for {Path(exe_path).name} via Proton GE (prefix: {choice['prefix_code']})...",
+                text=f"Running setup for {Path(exe_path).name} via {runner_label} (prefix: {choice['prefix_code']})...",
                 fg=COLORS["text_secondary"])
         else:
             command = ["wine", exe_path] + extra_args
@@ -1239,8 +1542,8 @@ else:
     root.geometry(f"{width}x{height}+{x}+{y}")
 
 
-root.minsize(1000, 650)
-root.maxsize(1920, 1080)
+root.resizable(True, True)
+root.minsize(1000, 720)  # keep a floor so the layout/buttons don't get squished
 
 # =======================================================================
 # WIDGET CREATION
@@ -1298,11 +1601,33 @@ settings_menu.add_command(label="Extract Proton GE Archive...",
 settings_menu.add_command(label="Open Proton GE Folder",
                           command=open_protonge_folder)
 settings_menu.add_separator()
+settings_menu.add_command(label="Extract Proton-CachyOS Archive...",
+                          command=extract_protoncachyos_archive)
+settings_menu.add_command(label="Open Proton-CachyOS Folder",
+                          command=open_protoncachyos_folder)
+settings_menu.add_separator()
 settings_menu.add_command(label="Refresh List", 
                           command=lambda: update_script_list())
 
-settings_btn.config(command=lambda: settings_menu.post(settings_btn.winfo_rootx(), 
-                                                      settings_btn.winfo_rooty() + settings_btn.winfo_height() + 5))
+# Tk quirk: while a popup Menu is open it holds a grab, so clicking the
+# launcher button again first closes the menu (click-outside) and then
+# that same click still reaches the button, instantly reopening it - it
+# looks like the menu "can't be closed". We track when the menu closes
+# and briefly ignore reopen requests that land right after that.
+_settings_menu_state = {"closed_at": 0.0}
+
+def _on_settings_menu_closed(event=None):
+    _settings_menu_state["closed_at"] = time.monotonic()
+
+settings_menu.bind("<Unmap>", _on_settings_menu_closed)
+
+def toggle_settings_menu():
+    if time.monotonic() - _settings_menu_state["closed_at"] < 0.25:
+        return  # this click was the one that just closed the menu - don't reopen
+    settings_menu.post(settings_btn.winfo_rootx(),
+                        settings_btn.winfo_rooty() + settings_btn.winfo_height() + 5)
+
+settings_btn.config(command=toggle_settings_menu)
 
 # MAIN CONTENT
 main_container = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
@@ -1360,14 +1685,34 @@ tree.column("No", width=40, anchor="center", minwidth=40, stretch=False)
 tree.column("Game Name", width=300, anchor="w", minwidth=200, stretch=True)
 
 tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+def on_tree_click(event):
+    """Clicking an already-selected game a second time deselects it,
+    instead of doing nothing (ttk.Treeview's default with selectmode='browse')."""
+    row_id = tree.identify_row(event.y)
+    if not row_id:
+        return  # clicked empty space / header - let default handling run
+    if row_id in tree.selection():
+        tree.selection_remove(row_id)
+        tree.focus('')
+        on_select()
+        return "break"  # swallow the click so it doesn't just re-select the row
+
+tree.bind("<Button-1>", on_tree_click)
 tree.bind("<<TreeviewSelect>>", on_select)
 
 # RIGHT PANEL (Game Details)
 right_panel = ttk.Frame(main_container, padding=15)
 main_container.add(right_panel, weight=1)
 
+# BUTTON PANEL - packed FIRST (before the icon/title/info widgets below) so
+# the packer always reserves its space at the bottom of right_panel first.
+# If it were packed last, a long game folder path making info_label taller
+# could eat into its space and squeeze/shift the buttons around.
+button_panel = ttk.Frame(right_panel, padding=(0, 10))
+button_panel.pack(fill=tk.X, side=tk.BOTTOM)
+
 icon_frame = ttk.Frame(right_panel, width=ICON_WIDTH, height=ICON_HEIGHT)
-icon_frame.pack(pady=(0, 15))
+icon_frame.pack(pady=(0, 10))
 icon_frame.pack_propagate(False) 
 
 icon_label = tk.Label(icon_frame, relief="flat")
@@ -1378,7 +1723,7 @@ game_title_label = tk.Label(right_panel,
                                 font=FONTS["subtitle"],
                                 justify=tk.CENTER,
                                 wraplength=ICON_WIDTH) 
-game_title_label.pack(pady=(0, 15))
+game_title_label.pack(pady=(0, 8))
 
 info_text = tk.StringVar(value="Select a game to view details")
 info_label = tk.Label(right_panel,
@@ -1386,11 +1731,7 @@ info_label = tk.Label(right_panel,
                         font=FONTS["small"],
                         justify=tk.LEFT,
                         wraplength=ICON_WIDTH + 50) 
-info_label.pack(pady=(0, 25))
-
-# BUTTON PANEL 
-button_panel = ttk.Frame(right_panel, padding=(0, 10))
-button_panel.pack(fill=tk.X, side=tk.BOTTOM)
+info_label.pack(pady=(0, 10))
 
 # Button grid - Row 1
 btn_row1 = ttk.Frame(button_panel)
@@ -1425,7 +1766,15 @@ filemanager_btn = ttk.Button(btn_row2, text="📂 FOLDER", command=open_file_man
 all_buttons.append(filemanager_btn)
 filemanager_btn.grid(row=0, column=2, padx=3, pady=3)
 
-# Setup button - Row 3
+# Logs button - Row 3
+btn_row3 = ttk.Frame(button_panel)
+btn_row3.pack(pady=3)
+
+logs_btn = ttk.Button(btn_row3, text="📜 VIEW LOGS", command=view_logs, style="Custom.TButton", width=38)
+all_buttons.append(logs_btn)
+logs_btn.grid(row=0, column=0, padx=3, pady=3)
+
+# Setup button - Row 4
 setup_btn = ttk.Button(button_panel, text="APPS SETUP", command=run_exe_setup, style="Custom.TButton", width=38)
 all_buttons.append(setup_btn)
 setup_btn.pack(pady=8)
@@ -1438,5 +1787,8 @@ apply_theme(CURRENT_THEME)
 
 # Load script list
 update_script_list()
+
+# Start the background poller that feeds live game output into any open Logs window
+root.after(150, poll_log_queues)
 
 root.mainloop()
