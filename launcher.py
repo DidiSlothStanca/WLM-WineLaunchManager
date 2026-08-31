@@ -43,6 +43,22 @@ protoncachyos_dir.mkdir(parents=True, exist_ok=True)
 protoncachyos_prefix_root.mkdir(parents=True, exist_ok=True)
 logs_dir.mkdir(parents=True, exist_ok=True)
 
+def get_clean_subprocess_env():
+    """Returns a copy of the environment safe to hand to external programs
+    (xdg-open, file managers, wine, winecfg, proton, etc).
+
+    When this launcher itself is running from inside an AppImage, the
+    AppImage runtime sets LD_LIBRARY_PATH to point at its own bundled
+    libraries so *this* process can find them. Child processes spawned
+    with subprocess.Popen() inherit that same LD_LIBRARY_PATH by default,
+    which makes them try to load the AppImage's bundled libs instead of
+    the system's own - this is why things like "open folder" can silently
+    fail to do anything when running from an AppImage build."""
+    env = os.environ.copy()
+    if "APPIMAGE" in env and "LD_LIBRARY_PATH" in env:
+        del env["LD_LIBRARY_PATH"]
+    return env
+
 # =======================================================================
 # Live log
 # =======================================================================
@@ -357,7 +373,8 @@ def open_proton_folder(target_dir, build_label):
     """Buka folder tempat sebuah build Proton diekstrak."""
     try:
         target_dir.mkdir(exist_ok=True)
-        subprocess.Popen(["xdg-open", str(target_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["xdg-open", str(target_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          env=get_clean_subprocess_env())
         status_label.config(text=f"Opening {build_label} Folder...", fg=COLORS["text_secondary"])
     except Exception as e:
         status_label.config(text=f"Error opening {build_label} folder: {str(e)}", fg=COLORS["danger"])
@@ -1016,7 +1033,8 @@ def open_log_window(script_name_only):
     ttk.Button(bottom_bar, text="Clear View", command=clear_view).pack(side=tk.LEFT)
     ttk.Button(bottom_bar, text="Open Log File",
                command=lambda: subprocess.Popen(["xdg-open", str(log_path)],
-                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                                 env=get_clean_subprocess_env())
                if log_path.exists() else messagebox.showinfo("Info", "No log file yet")
                ).pack(side=tk.LEFT, padx=(8, 0))
 
@@ -1097,7 +1115,8 @@ def run_script():
                                  stderr=slave_fd,
                                  stdin=slave_fd,
                                  close_fds=True,
-                                 start_new_session=True)
+                                 start_new_session=True,
+                                 env=get_clean_subprocess_env())
         os.close(slave_fd)
 
         running_games[script_name_only] = {
@@ -1410,7 +1429,8 @@ def open_file_manager():
 
         if folder_path and Path(folder_path).is_dir():
             # Use xdg-open to open the folder in the default file manager
-            subprocess.Popen(["xdg-open", folder_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(["xdg-open", folder_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              env=get_clean_subprocess_env())
             status_label.config(text=f"Opening folder for {script_name}...", fg=COLORS["text_secondary"])
         else:
             messagebox.showerror("Error", f"Folder path not found or invalid in script for {script_name}.")
@@ -1427,7 +1447,8 @@ def open_wine_prefix_folder():
     try:
         if Path(wine_prefix).is_dir():
             # Use xdg-open to open the folder in the default file manager
-            subprocess.Popen(["xdg-open", str(wine_prefix)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(["xdg-open", str(wine_prefix)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              env=get_clean_subprocess_env())
             status_label.config(text="Opening Wine Prefix Folder...", fg=COLORS["text_secondary"])
         else:
             messagebox.showerror("Error", f"Wine Prefix folder not found: {wine_prefix}")
@@ -1438,7 +1459,8 @@ def open_wine_prefix_folder():
 def open_winecfg():
     """Open winecfg"""
     try:
-        subprocess.Popen(["winecfg"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["winecfg"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          env=get_clean_subprocess_env())
         status_label.config(text="Opening Wine Configuration...", fg=COLORS["text_secondary"])
     except FileNotFoundError:
         messagebox.showerror("Error", "The 'wine' command was not found.")
@@ -1464,7 +1486,7 @@ def run_exe_setup():
 
     try:
         env_vars, extra_args = parse_launch_options(choice.get("launch_options", ""))
-        env = os.environ.copy()
+        env = get_clean_subprocess_env()
         for key, val in env_vars:
             env[key] = val
 
