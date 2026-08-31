@@ -22,10 +22,11 @@ protonge_prefix_root = directory / "protonprefixes"   # prefix ProtonGE dibuat d
 runner_config_file = directory / "runner_config.json"  # menyimpan pilihan runner (wine/protonge) per game
 
 # Create directories if they don't exist
-bashlaunch_dir.mkdir(exist_ok=True)
-icon_dir.mkdir(exist_ok=True)
-protonge_dir.mkdir(exist_ok=True)
-protonge_prefix_root.mkdir(exist_ok=True)
+directory.mkdir(parents=True, exist_ok=True)
+bashlaunch_dir.mkdir(parents=True, exist_ok=True)
+icon_dir.mkdir(parents=True, exist_ok=True)
+protonge_dir.mkdir(parents=True, exist_ok=True)
+protonge_prefix_root.mkdir(parents=True, exist_ok=True)
 
 # =======================================================================
 # THEME SYSTEM & CONFIG
