@@ -312,54 +312,106 @@ def extract_proton_archive(target_dir, build_label):
     """Pilih arsip Proton (.tar.gz/.tar.xz/.tgz/.zip) lalu ekstrak ke target_dir.
     Dipakai bersama oleh Proton GE dan Proton-CachyOS."""
     archive_path = filedialog.askopenfilename(
-        title=f"Pilih Arsip {build_label}",
+        title=f"Select {build_label} Archive",
         filetypes=[(f"{build_label} Archive", "*.tar.gz *.tar.xz *.tgz *.zip"), ("All Files", "*.*")]
     )
     if not archive_path:
         return
 
     archive_path_obj = Path(archive_path)
-    status_label.config(text=f"Mengekstrak {archive_path_obj.name} ke direktori WLM...", fg=COLORS["text_secondary"])
-    root.update_idletasks()
+    status_label.config(text=f"Extracting {archive_path_obj.name} to WLM directory...", fg=COLORS["text_secondary"])
 
-    try:
-        target_dir.mkdir(exist_ok=True)
-        before_entries = {p.name for p in target_dir.iterdir() if p.is_dir()}
+    # Extraction of a large Proton archive can take a while, and doing it
+    # directly on the Tk main thread would freeze the whole window for that
+    # entire time (no repaint, no response to clicks) - which looks exactly
+    # like the app has crashed/hung. So the actual extraction work runs on a
+    # background thread, and we show a small modal popup with an animated
+    # progress bar in the meantime to make it clear something is happening.
+    loading_dialog = tk.Toplevel(root)
+    loading_dialog.title(f"Extracting {build_label}")
+    loading_dialog.configure(bg=COLORS["primary"])
+    loading_dialog.resizable(False, False)
+    loading_dialog.transient(root)
+    loading_dialog.protocol("WM_DELETE_WINDOW", lambda: None)  # block closing while extraction is running
 
-        if archive_path_obj.suffix.lower() == ".zip":
-            import zipfile
-            with zipfile.ZipFile(archive_path, 'r') as zf:
-                top_level_names = {Path(n).parts[0] for n in zf.namelist() if n.strip()}
-                zf.extractall(target_dir)
+    loading_frame = ttk.Frame(loading_dialog, padding=20)
+    loading_frame.pack(fill=tk.BOTH, expand=True)
+
+    ttk.Label(loading_frame,
+              text=f"Extracting {archive_path_obj.name}...",
+              font=FONTS["subtitle"], justify=tk.CENTER).pack(pady=(0, 4))
+    ttk.Label(loading_frame,
+              text="This can take a while for large archives.\nPlease wait, the launcher is not frozen.",
+              font=FONTS["small"], justify=tk.CENTER).pack(pady=(0, 14))
+
+    progress_bar = ttk.Progressbar(loading_frame, mode="indeterminate", length=280)
+    progress_bar.pack()
+    progress_bar.start(12)  # animate the bar so movement is visible even with no % info
+
+    # Center the popup over the main window.
+    loading_dialog.update_idletasks()
+    x = root.winfo_rootx() + (root.winfo_width() - loading_dialog.winfo_width()) // 2
+    y = root.winfo_rooty() + (root.winfo_height() - loading_dialog.winfo_height()) // 2
+    loading_dialog.geometry(f"+{x}+{y}")
+    loading_dialog.grab_set()  # modal: prevent interacting with the main window mid-extraction
+
+    extract_result = {"error": None}
+
+    def do_extract():
+        try:
+            target_dir.mkdir(exist_ok=True)
+            before_entries = {p.name for p in target_dir.iterdir() if p.is_dir()}
+
+            if archive_path_obj.suffix.lower() == ".zip":
+                import zipfile
+                with zipfile.ZipFile(archive_path, 'r') as zf:
+                    top_level_names = {Path(n).parts[0] for n in zf.namelist() if n.strip()}
+                    zf.extractall(target_dir)
+            else:
+                import tarfile
+                with tarfile.open(archive_path, 'r:*') as tf:
+                    top_level_names = {Path(n).parts[0] for n in tf.getnames() if n.strip()}
+                    try:
+                        tf.extractall(target_dir, filter='data')
+                    except TypeError:
+                        # Python versi lama belum mendukung parameter 'filter'
+                        tf.extractall(target_dir)
+
+            new_top_names = top_level_names - before_entries
+
+            # Jika arsip tidak memiliki satu folder induk (file berserakan di root arsip),
+            # bungkus hasil ekstrak ke dalam satu folder bernama sesuai arsipnya.
+            if len(new_top_names) != 1:
+                wrapper_name = archive_path_obj.name.replace(".tar.gz", "").replace(".tar.xz", "") \
+                                                     .replace(".tgz", "").replace(".zip", "")
+                wrapper_dir = target_dir / wrapper_name
+                wrapper_dir.mkdir(exist_ok=True)
+                for name in new_top_names:
+                    src = target_dir / name
+                    if src.exists() and src != wrapper_dir:
+                        src.rename(wrapper_dir / name)
+        except Exception as e:
+            extract_result["error"] = e
+
+    def finish_extract():
+        progress_bar.stop()
+        loading_dialog.grab_release()
+        loading_dialog.destroy()
+
+        if extract_result["error"] is None:
+            status_label.config(text=f"{build_label} successfully extracted to {target_dir}", fg=COLORS["success"])
+            messagebox.showinfo("Done", f"{build_label} successfully extracted to the WLM directory:\n{target_dir}")
         else:
-            import tarfile
-            with tarfile.open(archive_path, 'r:*') as tf:
-                top_level_names = {Path(n).parts[0] for n in tf.getnames() if n.strip()}
-                try:
-                    tf.extractall(target_dir, filter='data')
-                except TypeError:
-                    # Python versi lama belum mendukung parameter 'filter'
-                    tf.extractall(target_dir)
+            e = extract_result["error"]
+            status_label.config(text=f"Error extracting {build_label}: {str(e)}", fg=COLORS["danger"])
+            messagebox.showerror("Error", f"Failed to extract archive:\n{str(e)}")
 
-        new_top_names = top_level_names - before_entries
+    def worker():
+        do_extract()
+        # Hop back onto the Tk main thread before touching any widget.
+        root.after(0, finish_extract)
 
-        # Jika arsip tidak memiliki satu folder induk (file berserakan di root arsip),
-        # bungkus hasil ekstrak ke dalam satu folder bernama sesuai arsipnya.
-        if len(new_top_names) != 1:
-            wrapper_name = archive_path_obj.name.replace(".tar.gz", "").replace(".tar.xz", "") \
-                                                 .replace(".tgz", "").replace(".zip", "")
-            wrapper_dir = target_dir / wrapper_name
-            wrapper_dir.mkdir(exist_ok=True)
-            for name in new_top_names:
-                src = target_dir / name
-                if src.exists() and src != wrapper_dir:
-                    src.rename(wrapper_dir / name)
-
-        status_label.config(text=f"{build_label} berhasil diekstrak ke {target_dir}", fg=COLORS["success"])
-        messagebox.showinfo("Selesai", f"{build_label} berhasil diekstrak ke direktori WLM:\n{target_dir}")
-    except Exception as e:
-        status_label.config(text=f"Error mengekstrak {build_label}: {str(e)}", fg=COLORS["danger"])
-        messagebox.showerror("Error", f"Gagal mengekstrak arsip:\n{str(e)}")
+    threading.Thread(target=worker, daemon=True).start()
 
 def extract_protonge_archive():
     """Pilih arsip Proton GE (.tar.gz/.tar.xz/.tgz/.zip) lalu ekstrak ke ~/wlm/protonge/."""
@@ -527,7 +579,7 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
         existing_cfg = load_runner_config().get(parent_script_name)
 
     dialog = tk.Toplevel(root)
-    dialog.title("Pilih Runner - Setup" if purpose == "setup" else "Pilih Runner - Play")
+    dialog.title("Select Runner - Setup" if purpose == "setup" else "Select Runner - Play")
     dialog.configure(bg=COLORS["primary"])
     dialog.resizable(False, False)
     dialog.transient(root)
@@ -538,21 +590,33 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
     frame = ttk.Frame(dialog, padding=15)
     frame.pack(fill=tk.BOTH, expand=True)
 
-    ttk.Label(frame, text="Pilih compatibility layer untuk menjalankan game:",
+    ttk.Label(frame, text="Select Runner - Game:",
               font=FONTS["normal"]).pack(anchor="w", pady=(0, 10))
 
     existing_runner = existing_cfg.get("runner") if existing_cfg else None
     default_runner = existing_runner if existing_runner in ("protonge", "protoncachyos") else "wine"
     runner_var = tk.StringVar(value=default_runner)
 
-    ttk.Radiobutton(frame, text="Wine (Vanilla)", variable=runner_var, value="wine").pack(anchor="w", pady=2)
-    protonge_radio = ttk.Radiobutton(frame, text="Proton GE", variable=runner_var, value="protonge")
-    protonge_radio.pack(anchor="w", pady=2)
-    protoncachyos_radio = ttk.Radiobutton(frame, text="Proton-CachyOS", variable=runner_var, value="protoncachyos")
-    protoncachyos_radio.pack(anchor="w", pady=2)
+    # Baris pemilihan runner - ditampilkan sebagai tombol bertema (bukan radio
+    # bulat bawaan Tk) supaya ukurannya seragam dan warnanya konsisten dengan
+    # tombol-tombol lain di aplikasi (highlight saat dipilih).
+    runner_row = ttk.Frame(frame)
+    runner_row.pack(anchor="w", pady=(0, 2))
+
+    wine_radio = ttk.Radiobutton(runner_row, text="Wine (Vanilla)", variable=runner_var,
+                                  value="wine", style="Runner.TRadiobutton", width=14)
+    wine_radio.grid(row=0, column=0, padx=3, pady=3)
+
+    protonge_radio = ttk.Radiobutton(runner_row, text="Proton GE", variable=runner_var,
+                                      value="protonge", style="Runner.TRadiobutton", width=14)
+    protonge_radio.grid(row=0, column=1, padx=3, pady=3)
+
+    protoncachyos_radio = ttk.Radiobutton(runner_row, text="Proton-CachyOS", variable=runner_var,
+                                           value="protoncachyos", style="Runner.TRadiobutton", width=14)
+    protoncachyos_radio.grid(row=0, column=2, padx=3, pady=3)
 
     # --- Widget grup untuk Proton GE ---
-    protonge_version_label = ttk.Label(frame, text="Versi Proton GE:", font=FONTS["small"])
+    protonge_version_label = ttk.Label(frame, text="Proton GE Version:", font=FONTS["small"])
     protonge_version_combo = ttk.Combobox(frame, state="readonly", width=32, font=FONTS["small"])
 
     if protonge_list:
@@ -562,19 +626,19 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
             default_idx = list(protonge_version_combo["values"]).index(existing_cfg["proton_name"])
         protonge_version_combo.current(default_idx)
     else:
-        protonge_version_combo["values"] = ["(Belum ada - Extract di menu Settings)"]
+        protonge_version_combo["values"] = ["(None yet - Extract via Settings menu)"]
         protonge_version_combo.current(0)
         protonge_radio.config(state="disabled")
 
     protonge_prefix_info_var = tk.StringVar()
     if existing_cfg and existing_cfg.get("runner") == "protonge" and existing_cfg.get("prefix_code"):
-        protonge_prefix_info_var.set(f"Prefix: {existing_cfg.get('prefix_code')} (dipakai sebelumnya, konsisten)")
+        protonge_prefix_info_var.set(f"Prefix: {existing_cfg.get('prefix_code')} (used previously, kept consistent)")
     else:
-        protonge_prefix_info_var.set("Prefix baru akan dibuat otomatis di direktori utama")
+        protonge_prefix_info_var.set("A new prefix will be created automatically in the main directory")
     protonge_prefix_label = ttk.Label(frame, textvariable=protonge_prefix_info_var, font=FONTS["small"])
 
     # --- Widget grup untuk Proton-CachyOS ---
-    cachyos_version_label = ttk.Label(frame, text="Versi Proton-CachyOS:", font=FONTS["small"])
+    cachyos_version_label = ttk.Label(frame, text="Proton-CachyOS Version:", font=FONTS["small"])
     cachyos_version_combo = ttk.Combobox(frame, state="readonly", width=32, font=FONTS["small"])
 
     if protoncachyos_list:
@@ -584,15 +648,15 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
             default_idx = list(cachyos_version_combo["values"]).index(existing_cfg["proton_name"])
         cachyos_version_combo.current(default_idx)
     else:
-        cachyos_version_combo["values"] = ["(Belum ada - Extract di menu Settings)"]
+        cachyos_version_combo["values"] = ["(None yet - Extract via Settings menu)"]
         cachyos_version_combo.current(0)
         protoncachyos_radio.config(state="disabled")
 
     cachyos_prefix_info_var = tk.StringVar()
     if existing_cfg and existing_cfg.get("runner") == "protoncachyos" and existing_cfg.get("prefix_code"):
-        cachyos_prefix_info_var.set(f"Prefix: {existing_cfg.get('prefix_code')} (dipakai sebelumnya, konsisten)")
+        cachyos_prefix_info_var.set(f"Prefix: {existing_cfg.get('prefix_code')} (used previously, kept consistent)")
     else:
-        cachyos_prefix_info_var.set("Prefix baru akan dibuat otomatis di direktori utama")
+        cachyos_prefix_info_var.set("A new prefix will be created automatically in the main directory")
     cachyos_prefix_label = ttk.Label(frame, textvariable=cachyos_prefix_info_var, font=FONTS["small"])
 
     def toggle_runner_widgets(*_):
@@ -621,16 +685,16 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
 
     ttk.Separator(frame, orient="horizontal").pack(fill=tk.X, pady=(5, 10))
 
-    ttk.Label(frame, text="Launch Options / Environment Variable (opsional):",
+    ttk.Label(frame, text="Launch Options / Environment Variable (optional):",
               font=FONTS["small"]).pack(anchor="w", pady=(0, 2))
     launch_options_entry = ttk.Entry(frame, width=48, font=FONTS["small"])
     launch_options_entry.pack(anchor="w", fill=tk.X)
     if existing_cfg and existing_cfg.get("launch_options"):
         launch_options_entry.insert(0, existing_cfg["launch_options"])
-    ttk.Label(frame, text="Contoh: PROTON_USE_WINED3D=1 MANGOHUD=1",
+    ttk.Label(frame, text="Example: PROTON_USE_WINED3D=1 MANGOHUD=1",
               font=FONTS["small"]).pack(anchor="w", pady=(2, 10))
 
-    ttk.Label(frame, text="Catatan / Komentar (opsional):",
+    ttk.Label(frame, text="Comment (optional):",
               font=FONTS["small"]).pack(anchor="w", pady=(0, 2))
     comment_entry = ttk.Entry(frame, width=48, font=FONTS["small"])
     comment_entry.pack(anchor="w", fill=tk.X, pady=(0, 10))
@@ -666,7 +730,7 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
             build_label = "Proton-CachyOS"
 
         if not build_list:
-            messagebox.showerror("Error", f"{build_label} tidak ditemukan. Extract dulu lewat menu Settings.")
+            messagebox.showerror("Error", f"{build_label} not found. Extract it first via the Settings menu.")
             return
 
         idx = version_combo.current()
@@ -695,8 +759,10 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
         result["value"] = None
         dialog.destroy()
 
-    ttk.Button(btn_frame, text="OK", command=on_ok, style="Custom.TButton").pack(side=tk.RIGHT, padx=(5, 0))
-    ttk.Button(btn_frame, text="Batal", command=on_cancel, style="Custom.TButton").pack(side=tk.RIGHT)
+    # Batal di pojok kiri, OK di pojok kanan (frame ini sudah fill=X sehingga
+    # side=LEFT / side=RIGHT menempatkannya di ujung-ujung dialog).
+    ttk.Button(btn_frame, text="Cancel", command=on_cancel, style="Custom.TButton", width=12).pack(side=tk.LEFT)
+    ttk.Button(btn_frame, text="OK", command=on_ok, style="Custom.TButton", width=12).pack(side=tk.RIGHT)
 
     dialog.update_idletasks()
     w, h = dialog.winfo_width(), dialog.winfo_height()
@@ -766,6 +832,31 @@ def update_style_config():
               background=[("active", COLORS["highlight"]), ("!active", COLORS["button_bg"])],
               # If active (hover), use button_text. If not (!active), use button_fg.
               foreground=[("active", COLORS["button_text"]), ("!active", COLORS["button_fg"])])
+
+    # Runner-selection "radio buttons" restyled to look and size like the
+    # rest of the app's buttons (border/focus/padding/label layout copied
+    # from TButton so no round indicator is drawn), with the selected
+    # runner highlighted the same way an active/hovered button is.
+    style.layout("Runner.TRadiobutton", style.layout("TButton"))
+    style.configure("Runner.TRadiobutton",
+                    background=COLORS["button_bg"],
+                    foreground=COLORS["button_fg"],
+                    bordercolor=COLORS["border"],
+                    borderwidth=1,
+                    focusthickness=1,
+                    focuscolor=COLORS["highlight"],
+                    font=FONTS["normal"],
+                    anchor="center",
+                    padding=6)
+    style.map("Runner.TRadiobutton",
+              background=[("disabled", COLORS["card_bg"]),
+                          ("selected", COLORS["highlight"]),
+                          ("active", COLORS["highlight"]),
+                          ("!selected", COLORS["button_bg"])],
+              foreground=[("disabled", COLORS["text_secondary"]),
+                          ("selected", COLORS["button_text"]),
+                          ("active", COLORS["button_text"]),
+                          ("!selected", COLORS["button_fg"])])
     
     # Combobox style
     style.configure("TCombobox",
@@ -792,6 +883,14 @@ def update_style_config():
                     arrowcolor=COLORS["text"])
     style.map("TScrollbar",
               background=[("active", COLORS["highlight"])])
+
+    # Progressbar style (used by the extraction loading popup)
+    style.configure("TProgressbar",
+                    background=COLORS["highlight"],
+                    troughcolor=COLORS["card_bg"],
+                    bordercolor=COLORS["border"],
+                    lightcolor=COLORS["highlight"],
+                    darkcolor=COLORS["highlight"])
 
     # Treeview style
     style.configure("Treeview",
@@ -1067,7 +1166,7 @@ def run_script():
     # Pilih runner (Wine Vanilla / Proton GE) sebelum menjalankan game
     choice = ask_runner_choice(parent_script_name=script_name_only, purpose="play")
     if choice is None:
-        status_label.config(text="Launch dibatalkan.", fg=COLORS["text_secondary"])
+        status_label.config(text="Launch cancelled.", fg=COLORS["text_secondary"])
         return
 
     # Sesuaikan isi script dengan runner yang dipilih (proton GE butuh prefix & binary sendiri)
@@ -1082,7 +1181,7 @@ def run_script():
             status_label.config(text=f"Error updating script for runner: {str(e)}", fg=COLORS["danger"])
             return
     else:
-        status_label.config(text="Error: Tidak bisa membaca path exe/folder dari script.", fg=COLORS["danger"])
+        status_label.config(text="Error: Could not read exe/folder path from script.", fg=COLORS["danger"])
         return
 
     # Simpan pilihan runner untuk game ini agar konsisten di lain waktu
@@ -1481,7 +1580,7 @@ def run_exe_setup():
     # di dalam direktori utama (~/wlm/protonprefixes/GAMEXXX).
     choice = ask_runner_choice(parent_script_name=None, purpose="setup")
     if choice is None:
-        status_label.config(text="Setup dibatalkan.", fg=COLORS["text_secondary"])
+        status_label.config(text="Setup cancelled.", fg=COLORS["text_secondary"])
         return
 
     try:
@@ -1642,6 +1741,19 @@ def _on_settings_menu_closed(event=None):
     _settings_menu_state["closed_at"] = time.monotonic()
 
 settings_menu.bind("<Unmap>", _on_settings_menu_closed)
+
+def _on_global_click_closes_settings_menu(event):
+    # Tk's Menu is supposed to auto-close itself via an implicit grab whenever
+    # you click outside it, but that grab isn't reliable on every window
+    # manager - so we close it manually here instead of trusting Tk to do it.
+    if not settings_menu.winfo_ismapped():
+        return
+    if event.widget is settings_menu:
+        return  # click landed on the menu itself - let it handle its own command
+    settings_menu.unpost()
+
+# add="+" so this runs alongside (not instead of) each widget's own bindings
+root.bind_all("<Button-1>", _on_global_click_closes_settings_menu, add="+")
 
 def toggle_settings_menu():
     if time.monotonic() - _settings_menu_state["closed_at"] < 0.25:
