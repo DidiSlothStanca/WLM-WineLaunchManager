@@ -1,4 +1,4 @@
-# WLM - Wine Launch Manager
+# WLM - Wine Launch Manager WLM 0.1.0 (Beta)
 
 Wine Launch Manager (WLM) is a Python3-based application for managing Vanilla Wine applications on Linux distributions.
 
