@@ -5,7 +5,7 @@ Wine Launch Manager (WLM) is a Python3-based application for managing Vanilla Wi
 ---
 
 ## Screenshot
-![Screenshot WLM](WLM_SS/2.png)
+![Screenshot WLM](WLM_SS/02.png)
 ---
 
 ## How to Use WLM?
@@ -21,7 +21,7 @@ Wine Launch Manager (WLM) is a Python3-based application for managing Vanilla Wi
 
 ---
 
-## Install the required components or packages
+## Install the required components or packages (Option 1 - Using *.tar.gz file)
 
 ### **Debian / Ubuntu / Linux Mint**
 ```bash
@@ -53,7 +53,7 @@ sudo apk add python3 py3-tkinter py3-pillow
 
 ---
 
-## Steps to Run WLM:
+## Steps to Run WLM using Python3 (.tar.gz):
 
 1. Download the latest version of WLM.
 2. Open a terminal in the directory where the file has been downloaded (e.g., `~/Downloads`).
@@ -74,16 +74,34 @@ sudo apk add python3 py3-tkinter py3-pillow
 
 ---
 
+## Install using *.deb or *.rpm:
+![Screenshot WLM](WLM_SS/04.png)
+
+### **Debian/Ubuntu/Mint Linux**
+```bash
+sudo dpkg -i winelaunchmanager_x.x.x.deb -y
+```
+
+### **Fedora Linux**
+```bash
+sudo dnf install ./winelaunchmanager-x.x.x*.rpm
+```
+
+**Note:** Alternatively, you can using _**Appimage**_ version for portable apps.
+
 ## WLM Menu & Theme
-![Screenshot WLM](WLM_SS/1.png)
+![Screenshot WLM](WLM_SS/01.png)
 ---
 
 ## Features:
-
 - Manage Vanilla Wine applications via a user-friendly GUI.
+- Manage ProtonGE or ProtonCachyos in WLM.
+- Make Custom Prefix using custom runner or default runner.
+- Manage your Windows Apps & Games prefix.
 - Uninstall applications installed within Wine.
 - Display FPS using GalliumHUD or MangoHUD.
 - Create and manage shortcut lists in the Launcher.
+- Manage FPS counter using GalliumHUD or MangoHUD.
 ---
 ## How to Play?
 1. **Play Button**: Runs the application that has been added to the shortcut list.
@@ -94,10 +112,11 @@ sudo apk add python3 py3-tkinter py3-pillow
 6. **Launch Mode Button**: For Counter FPS using GalliumHUD & Mangohud (GL or VK)
 
 ## WLM Settings
-![Screenshot WLM](WLM_SS/5.png)
+![Screenshot WLM](WLM_SS/05.png)
 ### **Settings Menu:**
 
 - **Winecfg Button**: Opens the Wine Vanilla configuration.
+- **Extract ProtonGE/ProtonCachyOS**: Extract runner Proton form your downloaded file (.tar.gz).
 - **Open Wine Prefix Folder**: Opens Wine Prefix Folder.
 - **Uninstaller**: Uninstalls programs installed within Wine.
 - **Wine Explorer**: Opens the file manager or explorer inside Wine.
