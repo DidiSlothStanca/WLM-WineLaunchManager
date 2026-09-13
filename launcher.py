@@ -1,6 +1,7 @@
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import threading
 import queue
@@ -30,8 +31,22 @@ protonge_prefix_root = directory / "protonprefixes"   # prefix ProtonGE dibuat d
 protoncachyos_dir = directory / "protoncachyos"                    # tempat ekstrak binary Proton-CachyOS
 protoncachyos_prefix_root = directory / "protoncachyosprefixes"    # prefix Proton-CachyOS dibuat disini, terpisah dari Proton GE
 
+# Wine (vanilla) prefix path - dibuat agar prefix Wine juga punya lokasi default rapi
+# didalam direktori utama WLM, bukan langsung menumpuk di ~/.wine (root direktori home).
+wine_prefix_root = directory / "wineprefixes"
+
 runner_config_file = directory / "runner_config.json"  # menyimpan pilihan runner (wine/protonge/protoncachyos) per game
+prefix_location_config_file = directory / "prefix_location_config.json"  # lokasi default kustom untuk prefix BARU, per jenis runner
+prefix_registry_file = directory / "prefix_registry.json"  # catatan semua prefix yang pernah dibuat (lokasi & versi proton-nya)
 logs_dir = directory / "logs"                          # menyimpan output stdout/stderr wine & proton per game
+
+# Lokasi default (bawaan) tempat prefix BARU dibuat untuk masing-masing runner,
+# sebelum ada kustomisasi lokasi oleh pengguna lewat dialog pemilihan runner.
+DEFAULT_PREFIX_ROOTS = {
+    "wine": wine_prefix_root,
+    "protonge": protonge_prefix_root,
+    "protoncachyos": protoncachyos_prefix_root,
+}
 
 # Buat direktori jika tidak ada.
 directory.mkdir(parents=True, exist_ok=True)
@@ -41,6 +56,7 @@ protonge_dir.mkdir(parents=True, exist_ok=True)
 protonge_prefix_root.mkdir(parents=True, exist_ok=True)
 protoncachyos_dir.mkdir(parents=True, exist_ok=True)
 protoncachyos_prefix_root.mkdir(parents=True, exist_ok=True)
+wine_prefix_root.mkdir(parents=True, exist_ok=True)
 logs_dir.mkdir(parents=True, exist_ok=True)
 
 def get_clean_subprocess_env():
@@ -439,16 +455,310 @@ def open_protoncachyos_folder():
     """Buka folder tempat Proton-CachyOS diekstrak (~/wlm/protoncachyos)."""
     open_proton_folder(protoncachyos_dir, "Proton-CachyOS")
 
-def generate_next_prefix_code(prefix_root):
-    """Generate kode prefix baru secara berurutan (GAME001, GAME002, ...) didalam prefix_root
-    yang diberikan, sesuai urutan installer dijalankan. Setiap runner (Proton GE / Proton-CachyOS)
-    punya prefix_root sendiri sehingga penomoran tidak saling bentrok."""
+def generate_next_prefix_code(runner_key):
+    """Generate kode prefix baru secara berurutan (GAME001, GAME002, ...) untuk runner_key
+    ('wine' / 'protonge' / 'protoncachyos'). Penomoran dibaca dari runner_config.json (bukan
+    hanya isi folder) supaya tetap konsisten walau prefix-prefix game sudah dipindah ke
+    lokasi/disk yang berbeda-beda. Folder default juga tetap dicek untuk jaga-jaga kalau ada
+    prefix lama yang belum tercatat rapi disana."""
     numbers = []
-    for entry in prefix_root.iterdir():
-        if entry.is_dir() and entry.name.startswith("GAME") and entry.name[4:].isdigit():
-            numbers.append(int(entry.name[4:]))
+    for cfg in load_runner_config().values():
+        if cfg.get("runner") == runner_key:
+            code = cfg.get("prefix_code", "") or ""
+            if code.startswith("GAME") and code[4:].isdigit():
+                numbers.append(int(code[4:]))
+
+    default_root = DEFAULT_PREFIX_ROOTS.get(runner_key)
+    if default_root and default_root.is_dir():
+        for entry in default_root.iterdir():
+            if entry.is_dir() and entry.name.startswith("GAME") and entry.name[4:].isdigit():
+                numbers.append(int(entry.name[4:]))
+
     next_num = max(numbers, default=0) + 1
     return f"GAME{next_num:03d}"
+
+def load_prefix_location_config():
+    """Load lokasi dasar (folder/disk) kustom untuk prefix BARU, per jenis runner.
+    Jika suatu runner tidak tercatat disini, berarti pakai lokasi default (folder WLM)."""
+    if prefix_location_config_file.exists():
+        try:
+            with open(prefix_location_config_file, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_prefix_location_config(cfg):
+    """Simpan lokasi dasar kustom untuk prefix BARU, per jenis runner."""
+    try:
+        with open(prefix_location_config_file, 'w') as f:
+            json.dump(cfg, f, indent=4)
+    except Exception as e:
+        print(f"Error saving prefix location config: {e}")
+
+def get_prefix_base_dir(runner_key):
+    """Base folder tempat prefix BARU untuk runner_key akan dibuat: lokasi kustom yang
+    tersimpan (jika masih valid) atau folder default didalam direktori WLM."""
+    cfg = load_prefix_location_config()
+    custom = cfg.get(runner_key)
+    default_root = DEFAULT_PREFIX_ROOTS[runner_key]
+    if custom:
+        p = Path(custom)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+        except Exception:
+            return default_root
+    return default_root
+
+def set_prefix_base_dir(runner_key, path):
+    """Simpan folder/disk kustom sebagai lokasi default berikutnya untuk prefix BARU
+    runner_key ini (dipakai lagi otomatis lain kali sampai diubah/direset)."""
+    cfg = load_prefix_location_config()
+    cfg[runner_key] = str(path)
+    save_prefix_location_config(cfg)
+
+def reset_prefix_base_dir(runner_key):
+    """Kembalikan lokasi default prefix BARU runner_key ini ke folder WLM (bawaan)."""
+    cfg = load_prefix_location_config()
+    if runner_key in cfg:
+        del cfg[runner_key]
+        save_prefix_location_config(cfg)
+
+def load_prefix_registry():
+    """Load catatan semua prefix yang pernah dibuat/dipakai: lokasi terakhirnya, dan untuk
+    Proton GE/CachyOS, versi Proton mana yang dipakai. Kunci: 'runner_key:prefix_code'."""
+    if prefix_registry_file.exists():
+        try:
+            with open(prefix_registry_file, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_prefix_registry(reg):
+    try:
+        with open(prefix_registry_file, 'w') as f:
+            json.dump(reg, f, indent=4)
+    except Exception as e:
+        print(f"Error saving prefix registry: {e}")
+
+def record_prefix_usage(runner_key, prefix_code, prefix_path, proton_name=None, proton_path=None):
+    """Catat sebuah prefix (lokasi & versi Proton yang dipakai jika ada) ke registry global.
+    Dipanggil setiap kali sebuah prefix dipakai/dibuat lewat dialog pemilihan runner, supaya
+    game lain yang belakangan terdeteksi memakai prefix yang sama (lihat find_owning_prefix)
+    bisa langsung tahu binary Proton mana yang harus dipakai juga."""
+    reg = load_prefix_registry()
+    key = f"{runner_key}:{prefix_code}"
+    reg[key] = {
+        "runner": runner_key,
+        "prefix_code": prefix_code,
+        "prefix_path": str(prefix_path),
+        "proton_name": proton_name,
+        "proton_path": proton_path,
+    }
+    save_prefix_registry(reg)
+
+def update_registry_prefix_path(runner_key, prefix_code, new_path):
+    """Perbarui lokasi sebuah prefix di registry setelah dipindahkan (Move Prefix),
+    tanpa mengubah data lain (mis. versi Proton) yang sudah tercatat untuknya."""
+    reg = load_prefix_registry()
+    key = f"{runner_key}:{prefix_code}"
+    if key in reg:
+        reg[key]["prefix_path"] = str(new_path)
+    else:
+        reg[key] = {"runner": runner_key, "prefix_code": prefix_code, "prefix_path": str(new_path),
+                    "proton_name": None, "proton_path": None}
+    save_prefix_registry(reg)
+
+def find_owning_prefix(exe_path):
+    """Cek apakah exe_path berada didalam salah satu folder prefix (Wine/Proton GE/
+    Proton-CachyOS) yang sudah pernah dibuat. Dipakai saat menambahkan game baru (+ ADD):
+    jika exe yang dipilih ternyata sudah terinstall didalam sebuah prefix (misalnya baru
+    saja diinstall lewat APPS SETUP), game itu HARUS langsung dikaitkan ke prefix yang sama
+    - bukan diberi prefix baru yang kosong. Ini penting untuk game (mis. GOG) yang lisensi/
+    aktivasinya terikat ke prefix tempat ia pertama kali diinstall; prefix baru berarti
+    game tidak bisa dijalankan lagi.
+
+    Return dict {"runner", "prefix_code", "prefix_path", "proton_name", "proton_path"}
+    atau None jika exe tidak berada didalam prefix manapun yang dikenal."""
+    try:
+        exe_resolved = exe_path.resolve()
+    except Exception:
+        exe_resolved = exe_path
+
+    registry = load_prefix_registry()
+    candidates = []
+    for entry in registry.values():
+        p = entry.get("prefix_path")
+        r = entry.get("runner")
+        c = entry.get("prefix_code")
+        if p and r and c:
+            candidates.append((r, c, Path(p)))
+
+    # Fallback: scan folder default & folder kustom yang sedang aktif, untuk prefix yang
+    # mungkin belum sempat tercatat di registry (mis. dibuat sebelum fitur ini ada).
+    loc_cfg = load_prefix_location_config()
+    scan_roots = [("wine", wine_prefix_root), ("protonge", protonge_prefix_root), ("protoncachyos", protoncachyos_prefix_root)]
+    for key, _default in list(scan_roots):
+        custom = loc_cfg.get(key)
+        if custom:
+            scan_roots.append((key, Path(custom)))
+
+    known_paths = {str(p.resolve()) for _, _, p in candidates if p.exists()}
+    for runner_key, base_dir in scan_roots:
+        if not base_dir.is_dir():
+            continue
+        for entry in base_dir.iterdir():
+            if entry.is_dir():
+                try:
+                    resolved = entry.resolve()
+                except Exception:
+                    continue
+                if str(resolved) not in known_paths:
+                    candidates.append((runner_key, entry.name, entry))
+
+    for runner_key, prefix_code, prefix_dir in candidates:
+        try:
+            prefix_resolved = prefix_dir.resolve()
+        except Exception:
+            continue
+        if prefix_resolved == exe_resolved or prefix_resolved in exe_resolved.parents:
+            reg_entry = registry.get(f"{runner_key}:{prefix_code}", {})
+            return {
+                "runner": runner_key,
+                "prefix_code": prefix_code,
+                "prefix_path": str(prefix_resolved),
+                "proton_name": reg_entry.get("proton_name"),
+                "proton_path": reg_entry.get("proton_path"),
+            }
+    return None
+
+def browse_folder_with_create_option(title, initialdir):
+    """Buka dialog pilih folder (native OS), lalu tawarkan membuat SATU folder baru
+    didalam folder yang dipilih itu. Ini supaya prefix-prefix baru bisa dikumpulkan
+    rapi kedalam folder tujuan sendiri (mis. 'MyPrefixes') dan tidak "menyebar"
+    langsung bercampur dengan isi folder/disk yang sudah ada.
+    Mengembalikan Path folder terpilih (atau folder baru yang dibuat didalamnya),
+    atau None jika dibatalkan."""
+    chosen = filedialog.askdirectory(title=title, initialdir=initialdir, mustexist=True)
+    if not chosen:
+        return None
+
+    chosen_path = Path(chosen)
+    make_new = messagebox.askyesno(
+        "Create New Folder?",
+        f"Selected folder:\n{chosen_path}\n\n"
+        "Create a new folder inside it for the prefix(es)?\n"
+        "(Recommended so prefixes stay organized and don't mix with other files.)"
+    )
+    if not make_new:
+        return chosen_path
+
+    folder_name = simpledialog.askstring("New Folder", "New folder name:", parent=root)
+    if not folder_name or not folder_name.strip():
+        return chosen_path
+
+    new_dir = chosen_path / folder_name.strip()
+    try:
+        new_dir.mkdir(parents=True, exist_ok=True)
+        return new_dir
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to create folder:\n{str(e)}")
+        return chosen_path
+
+def move_prefix_folder_dialog(old_path, prefix_code, runner_key, on_done):
+    """Minta pengguna memilih folder/disk tujuan, lalu pindahkan folder prefix (old_path)
+    kesana di background thread (supaya UI tidak freeze untuk prefix berukuran besar).
+    Memanggil on_done(new_path) di main thread jika berhasil."""
+    initial_dir = str(old_path.parent) if old_path.parent.is_dir() else str(Path.home())
+    new_base_path = browse_folder_with_create_option(
+        title=f"Choose New Location for Prefix {prefix_code}",
+        initialdir=initial_dir
+    )
+    if new_base_path is None:
+        return
+
+    new_path = new_base_path / prefix_code
+
+    try:
+        same_location = new_path.resolve() == old_path.resolve()
+    except Exception:
+        same_location = False
+    if same_location:
+        messagebox.showinfo("Info", "The prefix is already in this location.")
+        return
+
+    if new_path.exists():
+        messagebox.showerror("Error", f"A folder named '{prefix_code}' already exists in that location.")
+        return
+
+    if not old_path.exists():
+        messagebox.showerror("Error", f"Prefix folder not found on disk:\n{old_path}")
+        return
+
+    if not messagebox.askyesno(
+        "Confirm Move",
+        f"Move prefix '{prefix_code}' to:\n{new_path}\n\n"
+        "Make sure the game/app using this prefix is not currently running.\n"
+        "This may take a while for large prefixes. Continue?"
+    ):
+        return
+
+    loading_dialog = tk.Toplevel(root)
+    loading_dialog.title("Moving Prefix")
+    loading_dialog.configure(bg=COLORS["primary"])
+    loading_dialog.resizable(False, False)
+    loading_dialog.transient(root)
+    loading_dialog.protocol("WM_DELETE_WINDOW", lambda: None)  # block closing while move is running
+
+    loading_frame = ttk.Frame(loading_dialog, padding=20)
+    loading_frame.pack(fill=tk.BOTH, expand=True)
+
+    ttk.Label(loading_frame,
+              text=f"Moving prefix '{prefix_code}'...",
+              font=FONTS["subtitle"], justify=tk.CENTER).pack(pady=(0, 4))
+    ttk.Label(loading_frame,
+              text="This can take a while for large prefixes.\nPlease wait, the launcher is not frozen.",
+              font=FONTS["small"], justify=tk.CENTER).pack(pady=(0, 14))
+
+    progress_bar = ttk.Progressbar(loading_frame, mode="indeterminate", length=280)
+    progress_bar.pack()
+    progress_bar.start(12)
+
+    loading_dialog.update_idletasks()
+    x = root.winfo_rootx() + (root.winfo_width() - loading_dialog.winfo_width()) // 2
+    y = root.winfo_rooty() + (root.winfo_height() - loading_dialog.winfo_height()) // 2
+    loading_dialog.geometry(f"+{x}+{y}")
+    loading_dialog.grab_set()
+
+    move_result = {"error": None}
+
+    def do_move():
+        try:
+            new_base_path.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old_path), str(new_path))
+        except Exception as e:
+            move_result["error"] = e
+
+    def finish_move():
+        progress_bar.stop()
+        loading_dialog.grab_release()
+        loading_dialog.destroy()
+
+        if move_result["error"] is None:
+            status_label.config(text=f"Prefix '{prefix_code}' moved to {new_path}", fg=COLORS["success"])
+            on_done(new_path)
+        else:
+            e = move_result["error"]
+            status_label.config(text=f"Error moving prefix: {str(e)}", fg=COLORS["danger"])
+            messagebox.showerror("Error", f"Failed to move prefix:\n{str(e)}")
+
+    def worker():
+        do_move()
+        root.after(0, finish_move)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 def load_runner_config():
     """Load pemetaan runner (wine/protonge) & prefix untuk tiap game."""
@@ -559,6 +869,8 @@ def build_script_content(folder_path, exe_path, choice):
         lines.append(f'export STEAM_COMPAT_CLIENT_INSTALL_PATH="{find_steam_install_path()}"')
         lines.append(f'"{choice["proton_path"]}" run "{exe_path}"{extra_args_str}')
     else:
+        if choice.get("prefix_path"):
+            lines.append(f'export WINEPREFIX="{choice["prefix_path"]}"')
         lines.append(f'wine "{exe_path}"{extra_args_str}')
     return "\n".join(lines) + "\n"
 
@@ -615,9 +927,119 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
                                            value="protoncachyos", style="Runner.TRadiobutton", width=14)
     protoncachyos_radio.grid(row=0, column=2, padx=3, pady=3)
 
+    # Container TETAP untuk semua kontrol yang bergantung pada runner yang dipilih (versi
+    # Proton, lokasi/pemindahan prefix, dst). Di-pack HANYA SEKALI disini, tepat dibawah baris
+    # pemilihan runner - dan tidak pernah di-pack ulang. Kalau widget didalamnya di-pack_forget()
+    # lalu di-pack() lagi (misalnya saat pindah tab Wine/Proton GE/Proton-CachyOS), Tkinter akan
+    # menaruhnya di urutan PALING AKHIR relatif terhadap widget lain di parent yang sama - itulah
+    # sebabnya sebelumnya panel ini bisa "melompat" ke bawah tombol Cancel/OK. Karena container
+    # ini sendiri tidak pernah di-pack ulang, posisinya di dialog selalu tetap, apapun yang
+    # terjadi didalamnya.
+    runner_dynamic_frame = ttk.Frame(frame)
+    runner_dynamic_frame.pack(anchor="w", fill=tk.X, pady=(0, 0))
+
+    def build_prefix_panel(parent_frame, runner_key, runner_label_text):
+        """Membuat panel kontrol lokasi prefix untuk satu runner (wine/protonge/protoncachyos)
+        didalam dialog ini. Dua kondisi:
+          - Prefix untuk game ini SUDAH ADA (dipakai ulang) -> tampilkan lokasinya sekarang
+            + tombol "Move Prefix..." untuk memindahkannya ke folder/disk lain kapan saja.
+          - Prefix untuk game ini BELUM ADA (akan dibuat baru saat OK ditekan) -> tampilkan
+            lokasi tujuan (default folder WLM, atau lokasi kustom tersimpan) + tombol untuk
+            memilih folder/disk lain atau mengembalikannya ke lokasi default.
+        Mengembalikan (panel_frame, state_dict). state_dict dibaca saat OK ditekan untuk
+        menentukan prefix_path final yang dipakai."""
+        state = {"existing_path": None, "existing_code": None, "new_base_dir": get_prefix_base_dir(runner_key)}
+        if existing_cfg and existing_cfg.get("runner") == runner_key and existing_cfg.get("prefix_code") and existing_cfg.get("prefix_path"):
+            state["existing_path"] = Path(existing_cfg["prefix_path"])
+            state["existing_code"] = existing_cfg["prefix_code"]
+
+        panel = ttk.Frame(parent_frame)
+        info_var = tk.StringVar()
+        ttk.Label(panel, textvariable=info_var, font=FONTS["small"], justify=tk.LEFT, wraplength=380).pack(anchor="w", pady=(2, 4))
+
+        btn_row = ttk.Frame(panel)
+        btn_row.pack(anchor="w", pady=(0, 8))
+
+        move_btn = ttk.Button(btn_row, text="🚚 Move Prefix...", style="Custom.TButton")
+        browse_btn = ttk.Button(btn_row, text="📁 Browse Other Folder/Disk...", style="Custom.TButton")
+        default_btn = ttk.Button(btn_row, text="↺ Use Default (WLM Folder)", style="Custom.TButton")
+
+        def refresh():
+            for w in (move_btn, browse_btn, default_btn):
+                w.pack_forget()
+            if state["existing_path"] is not None:
+                info_var.set(f"Prefix: {state['existing_code']} (used previously, kept consistent)\n"
+                              f"Location: {state['existing_path']}")
+                move_btn.pack(side=tk.LEFT)
+            else:
+                info_var.set(f"A new prefix will be created automatically at:\n{state['new_base_dir']} (e.g. GAMEXXX)")
+                browse_btn.pack(side=tk.LEFT, padx=(0, 5))
+                default_btn.pack(side=tk.LEFT)
+
+        def do_move():
+            def on_moved(new_path):
+                state["existing_path"] = new_path
+                # Operasi pindah sudah benar-benar terjadi di disk, jadi langsung simpan
+                # perubahannya ke runner_config.json meski dialog ini nanti dibatalkan.
+                if parent_script_name:
+                    cfg_all = load_runner_config()
+                    if parent_script_name in cfg_all and cfg_all[parent_script_name].get("runner") == runner_key:
+                        cfg_all[parent_script_name]["prefix_path"] = str(new_path)
+                        save_runner_config(cfg_all)
+                # Perbarui juga registry global supaya deteksi otomatis (find_owning_prefix)
+                # untuk game lain yang mungkin memakai prefix yang sama tetap akurat.
+                update_registry_prefix_path(runner_key, state["existing_code"], new_path)
+                refresh()
+            move_prefix_folder_dialog(state["existing_path"], state["existing_code"], runner_key, on_moved)
+
+        def do_browse():
+            initial = str(state["new_base_dir"]) if state["new_base_dir"].is_dir() else str(Path.home())
+            chosen_dir = browse_folder_with_create_option(
+                title=f"Choose Default Location for New {runner_label_text} Prefixes",
+                initialdir=initial
+            )
+            if chosen_dir:
+                state["new_base_dir"] = chosen_dir
+                set_prefix_base_dir(runner_key, state["new_base_dir"])
+                refresh()
+
+        def do_default():
+            state["new_base_dir"] = DEFAULT_PREFIX_ROOTS[runner_key]
+            reset_prefix_base_dir(runner_key)
+            refresh()
+
+        move_btn.config(command=do_move)
+        browse_btn.config(command=do_browse)
+        default_btn.config(command=do_default)
+
+        refresh()
+        return panel, state
+
+    # --- Widget grup untuk Wine (Vanilla) ---
+    # Wine dibiarkan pakai prefix bawaan sistem (WINEPREFIX env / ~/.wine) secara default demi
+    # kompatibilitas dengan game yang sudah pernah di-setup sebelumnya. Centang opsi dibawah untuk
+    # memberi game ini prefix terisolasi sendiri didalam folder WLM (atau lokasi lain pilihan sendiri).
+    existing_wine_prefix = bool(existing_cfg and existing_cfg.get("runner") == "wine" and existing_cfg.get("prefix_path"))
+    wine_use_prefix_var = tk.BooleanVar(value=existing_wine_prefix)
+    wine_checkbox = ttk.Checkbutton(
+        runner_dynamic_frame,
+        text="Use an isolated prefix for this game (avoids buildup in home folder)",
+        variable=wine_use_prefix_var,
+        style="Custom.TCheckbutton"
+    )
+    wine_prefix_panel, wine_prefix_state = build_prefix_panel(runner_dynamic_frame, "wine", "Wine")
+
+    def toggle_wine_panel(*_):
+        if wine_use_prefix_var.get():
+            wine_prefix_panel.pack(anchor="w", pady=(2, 8), fill=tk.X)
+        else:
+            wine_prefix_panel.pack_forget()
+
+    wine_use_prefix_var.trace_add("write", toggle_wine_panel)
+
     # --- Widget grup untuk Proton GE ---
-    protonge_version_label = ttk.Label(frame, text="Proton GE Version:", font=FONTS["small"])
-    protonge_version_combo = ttk.Combobox(frame, state="readonly", width=32, font=FONTS["small"])
+    protonge_version_label = ttk.Label(runner_dynamic_frame, text="Proton GE Version:", font=FONTS["small"])
+    protonge_version_combo = ttk.Combobox(runner_dynamic_frame, state="readonly", width=32, font=FONTS["small"])
 
     if protonge_list:
         protonge_version_combo["values"] = [name for name, _ in protonge_list]
@@ -630,16 +1052,11 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
         protonge_version_combo.current(0)
         protonge_radio.config(state="disabled")
 
-    protonge_prefix_info_var = tk.StringVar()
-    if existing_cfg and existing_cfg.get("runner") == "protonge" and existing_cfg.get("prefix_code"):
-        protonge_prefix_info_var.set(f"Prefix: {existing_cfg.get('prefix_code')} (used previously, kept consistent)")
-    else:
-        protonge_prefix_info_var.set("A new prefix will be created automatically in the main directory")
-    protonge_prefix_label = ttk.Label(frame, textvariable=protonge_prefix_info_var, font=FONTS["small"])
+    protonge_prefix_panel, protonge_prefix_state = build_prefix_panel(runner_dynamic_frame, "protonge", "Proton GE")
 
     # --- Widget grup untuk Proton-CachyOS ---
-    cachyos_version_label = ttk.Label(frame, text="Proton-CachyOS Version:", font=FONTS["small"])
-    cachyos_version_combo = ttk.Combobox(frame, state="readonly", width=32, font=FONTS["small"])
+    cachyos_version_label = ttk.Label(runner_dynamic_frame, text="Proton-CachyOS Version:", font=FONTS["small"])
+    cachyos_version_combo = ttk.Combobox(runner_dynamic_frame, state="readonly", width=32, font=FONTS["small"])
 
     if protoncachyos_list:
         cachyos_version_combo["values"] = [name for name, _ in protoncachyos_list]
@@ -652,33 +1069,33 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
         cachyos_version_combo.current(0)
         protoncachyos_radio.config(state="disabled")
 
-    cachyos_prefix_info_var = tk.StringVar()
-    if existing_cfg and existing_cfg.get("runner") == "protoncachyos" and existing_cfg.get("prefix_code"):
-        cachyos_prefix_info_var.set(f"Prefix: {existing_cfg.get('prefix_code')} (used previously, kept consistent)")
-    else:
-        cachyos_prefix_info_var.set("A new prefix will be created automatically in the main directory")
-    cachyos_prefix_label = ttk.Label(frame, textvariable=cachyos_prefix_info_var, font=FONTS["small"])
+    cachyos_prefix_panel, cachyos_prefix_state = build_prefix_panel(runner_dynamic_frame, "protoncachyos", "Proton-CachyOS")
 
     def toggle_runner_widgets(*_):
         chosen = runner_var.get()
 
-        # Sembunyikan dulu semua widget grup runner Proton, baru tampilkan yang relevan,
+        # Sembunyikan dulu semua widget grup runner, baru tampilkan yang relevan,
         # supaya tidak ada widget grup lain yang menumpuk saat berpindah pilihan.
+        wine_checkbox.pack_forget()
+        wine_prefix_panel.pack_forget()
         protonge_version_label.pack_forget()
         protonge_version_combo.pack_forget()
-        protonge_prefix_label.pack_forget()
+        protonge_prefix_panel.pack_forget()
         cachyos_version_label.pack_forget()
         cachyos_version_combo.pack_forget()
-        cachyos_prefix_label.pack_forget()
+        cachyos_prefix_panel.pack_forget()
 
-        if chosen == "protonge":
+        if chosen == "wine":
+            wine_checkbox.pack(anchor="w", pady=(10, 4))
+            toggle_wine_panel()
+        elif chosen == "protonge":
             protonge_version_label.pack(anchor="w", pady=(10, 2))
             protonge_version_combo.pack(anchor="w", pady=(0, 2))
-            protonge_prefix_label.pack(anchor="w", pady=(2, 10))
+            protonge_prefix_panel.pack(anchor="w", pady=(2, 6), fill=tk.X)
         elif chosen == "protoncachyos":
             cachyos_version_label.pack(anchor="w", pady=(10, 2))
             cachyos_version_combo.pack(anchor="w", pady=(0, 2))
-            cachyos_prefix_label.pack(anchor="w", pady=(2, 10))
+            cachyos_prefix_panel.pack(anchor="w", pady=(2, 6), fill=tk.X)
 
     runner_var.trace_add("write", toggle_runner_widgets)
     toggle_runner_widgets()
@@ -710,24 +1127,38 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
         comment_value = comment_entry.get().strip()
 
         if chosen == "wine":
-            result["value"] = {
+            result_value = {
                 "runner": "wine",
                 "launch_options": launch_options_value,
                 "comment": comment_value
             }
+            if wine_use_prefix_var.get():
+                if wine_prefix_state["existing_path"] is not None:
+                    prefix_code = wine_prefix_state["existing_code"]
+                    prefix_path = wine_prefix_state["existing_path"]
+                else:
+                    prefix_code = generate_next_prefix_code("wine")
+                    prefix_path = wine_prefix_state["new_base_dir"] / prefix_code
+                prefix_path.mkdir(parents=True, exist_ok=True)
+                record_prefix_usage("wine", prefix_code, prefix_path)
+                result_value["prefix_code"] = prefix_code
+                result_value["prefix_path"] = str(prefix_path)
+            result["value"] = result_value
             dialog.destroy()
             return
 
         if chosen == "protonge":
             build_list = protonge_list
             version_combo = protonge_version_combo
-            prefix_root = protonge_prefix_root
             build_label = "Proton GE"
+            runner_key = "protonge"
+            prefix_state = protonge_prefix_state
         else:  # protoncachyos
             build_list = protoncachyos_list
             version_combo = cachyos_version_combo
-            prefix_root = protoncachyos_prefix_root
             build_label = "Proton-CachyOS"
+            runner_key = "protoncachyos"
+            prefix_state = cachyos_prefix_state
 
         if not build_list:
             messagebox.showerror("Error", f"{build_label} not found. Extract it first via the Settings menu.")
@@ -736,13 +1167,15 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
         idx = version_combo.current()
         proton_name, proton_path = build_list[idx]
 
-        if existing_cfg and existing_cfg.get("runner") == chosen and existing_cfg.get("prefix_code"):
-            prefix_code = existing_cfg["prefix_code"]
+        if prefix_state["existing_path"] is not None:
+            prefix_code = prefix_state["existing_code"]
+            prefix_path = prefix_state["existing_path"]
         else:
-            prefix_code = generate_next_prefix_code(prefix_root)
+            prefix_code = generate_next_prefix_code(runner_key)
+            prefix_path = prefix_state["new_base_dir"] / prefix_code
 
-        prefix_path = prefix_root / prefix_code
         prefix_path.mkdir(parents=True, exist_ok=True)
+        record_prefix_usage(runner_key, prefix_code, prefix_path, proton_name, str(proton_path))
 
         result["value"] = {
             "runner": chosen,
@@ -857,6 +1290,30 @@ def update_style_config():
                           ("selected", COLORS["button_text"]),
                           ("active", COLORS["button_text"]),
                           ("!selected", COLORS["button_fg"])])
+
+    # Checkbutton (mis. "Use an isolated prefix...") disesuaikan dengan tema aktif:
+    # tanpa ini, kotak centang memakai warna bawaan Tk (kotak putih polos) yang
+    # menonjol sendiri diatas latar gelap. Background label disamakan dengan
+    # latar frame (menyatu), kotak indikator memakai warna "text_background" saat
+    # kosong dan warna "highlight" tema saat dicentang, dengan tanda centang
+    # berwarna "button_text" supaya tetap kontras dan terbaca.
+    style.configure("Custom.TCheckbutton",
+                    background=COLORS["primary"],
+                    foreground=COLORS["text"],
+                    font=FONTS["normal"],
+                    indicatorbackground=COLORS["text_background"],
+                    indicatorforeground=COLORS["button_text"],
+                    indicatormargin=(0, 0, 6, 0),
+                    focuscolor=COLORS["highlight"])
+    style.map("Custom.TCheckbutton",
+              background=[("active", COLORS["primary"])],
+              foreground=[("disabled", COLORS["text_secondary"]),
+                          ("active", COLORS["text"])],
+              indicatorbackground=[("disabled", COLORS["card_bg"]),
+                                    ("selected", COLORS["highlight"]),
+                                    ("!selected", COLORS["text_background"])],
+              indicatorforeground=[("disabled", COLORS["text_secondary"]),
+                                    ("selected", COLORS["button_text"])])
     
     # Combobox style
     style.configure("TCombobox",
@@ -1234,6 +1691,8 @@ def run_script():
             runner_label = f"Proton GE ({choice['prefix_code']})"
         elif choice["runner"] == "protoncachyos":
             runner_label = f"Proton-CachyOS ({choice['prefix_code']})"
+        elif choice.get("prefix_code"):
+            runner_label = f"Wine ({choice['prefix_code']})"
         else:
             runner_label = "Wine"
         status_label.config(text=f"Launching {script_name[:-3]} via {runner_label} in {launch_mode} mode...", fg=COLORS["success"])
@@ -1270,24 +1729,55 @@ def add_script():
 
             script_path = bashlaunch_dir / f"{safe_new_name}.sh"
             folder_path = exe_path_obj.parent
-            
+            exe_resolved = exe_path_obj.resolve()
+            folder_resolved = folder_path.resolve()
+
             # Note the use of Path.resolve() to ensure absolute paths
             # and correct handling of spaces when writing to the bash script
             script_content = (
                 "#!/bin/bash\n"
-                f"cd \"{folder_path.resolve()}\"\n"
-                f"wine \"{exe_path_obj.resolve()}\"\n"
+                f"cd \"{folder_resolved}\"\n"
+                f"wine \"{exe_resolved}\"\n"
             )
-            
+
             try:
                 with open(script_path, "w") as script_file:
                     script_file.write(script_content)
                 
                 # Set permission
                 script_path.chmod(0o755)
-                
+
+                # Jika exe yang baru ditambahkan ternyata sudah berada didalam sebuah prefix
+                # yang sudah ada (misalnya baru saja selesai diinstall lewat APPS SETUP), kaitkan
+                # langsung game ini ke prefix yang sama - JANGAN biarkan PLAY pertama membuat
+                # prefix baru yang kosong. Ini krusial untuk game (mis. GOG) yang lisensi /
+                # aktivasinya terikat ke prefix tempat ia pertama kali diinstall.
+                owning = find_owning_prefix(exe_resolved)
+                status_extra = ""
+                if owning and (owning["runner"] == "wine" or owning.get("proton_path")):
+                    cfg_entry = {
+                        "runner": owning["runner"],
+                        "prefix_code": owning["prefix_code"],
+                        "prefix_path": owning["prefix_path"],
+                        "launch_options": "",
+                        "comment": ""
+                    }
+                    if owning["runner"] in ("protonge", "protoncachyos"):
+                        cfg_entry["proton_name"] = owning.get("proton_name") or ""
+                        cfg_entry["proton_path"] = owning["proton_path"]
+
+                    new_script_content = build_script_content(str(folder_resolved), str(exe_resolved), cfg_entry)
+                    with open(script_path, "w") as script_file:
+                        script_file.write(new_script_content)
+                    script_path.chmod(0o755)
+
+                    runner_cfg = load_runner_config()
+                    runner_cfg[safe_new_name] = cfg_entry
+                    save_runner_config(runner_cfg)
+                    status_extra = f" (linked to existing prefix {owning['prefix_code']})"
+
                 update_script_list()
-                status_label.config(text=f"Added: {safe_new_name}", fg=COLORS["success"])
+                status_label.config(text=f"Added: {safe_new_name}{status_extra}", fg=COLORS["success"])
             except Exception as e:
                 status_label.config(text=f"Error creating script: {str(e)}", fg=COLORS["danger"])
 
@@ -1599,9 +2089,14 @@ def run_exe_setup():
                 text=f"Running setup for {Path(exe_path).name} via {runner_label} (prefix: {choice['prefix_code']})...",
                 fg=COLORS["text_secondary"])
         else:
+            if choice.get("prefix_path"):
+                env["WINEPREFIX"] = choice["prefix_path"]
             command = ["wine", exe_path] + extra_args
             subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-            status_label.config(text=f"Running setup for {Path(exe_path).name} via Wine...", fg=COLORS["text_secondary"])
+            if choice.get("prefix_code"):
+                status_label.config(text=f"Running setup for {Path(exe_path).name} via Wine (prefix: {choice['prefix_code']})...", fg=COLORS["text_secondary"])
+            else:
+                status_label.config(text=f"Running setup for {Path(exe_path).name} via Wine...", fg=COLORS["text_secondary"])
     except FileNotFoundError:
         messagebox.showerror("Error", "Runner command was not found.")
         status_label.config(text="Error: Runner command not found.", fg=COLORS["danger"])
