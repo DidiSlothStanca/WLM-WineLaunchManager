@@ -13,6 +13,8 @@ from tkinter import ttk, filedialog, simpledialog, messagebox
 from pathlib import Path
 from PIL import Image, ImageTk, ImageDraw
 import json
+import tarfile
+import tempfile
 from datetime import datetime
 import time
 
@@ -571,6 +573,80 @@ def update_registry_prefix_path(runner_key, prefix_code, new_path):
                     "proton_name": None, "proton_path": None}
     save_prefix_registry(reg)
 
+def relink_scripts_after_prefix_move(runner_key, prefix_code, old_prefix_path, new_prefix_path):
+    """Setelah sebuah prefix dipindah (Move Prefix), perbaiki SEMUA game yang memakai prefix
+    ini - bukan cuma metadata prefix_path di runner_config.json, tapi juga ISI script .sh-nya
+    sendiri. Ini krusial: kalau file/folder game itu ternyata berada DIDALAM folder prefix
+    (mis. game GOG yang terinstall ke drive_c prefix), file-nya ikut berpindah SECARA FISIK
+    saat foldernya dipindah - tapi baris 'cd' dan 'wine'/proton run didalam script masih
+    berisi alamat LAMA yang sudah tidak ada, sehingga game tidak bisa di-launch sama sekali
+    walau sudah "ditimpa"/overwrite. Fungsi ini menghitung ulang path relatifnya terhadap
+    prefix dan menulis ulang scriptnya supaya menunjuk ke alamat BARU yang benar.
+
+    Game yang folder/exe-nya ternyata berada DILUAR prefix (tidak ikut fisik pindah) tetap
+    diperbaiki juga - hanya export WINEPREFIX/STEAM_COMPAT_DATA_PATH didalam scriptnya yang
+    diperbarui ke lokasi baru, path folder/exe-nya dibiarkan seperti semula.
+
+    Return list nama-nama game (script_name) yang scriptnya berhasil ditulis ulang."""
+    try:
+        old_resolved = Path(old_prefix_path).resolve()
+    except Exception:
+        old_resolved = Path(old_prefix_path)
+    new_resolved = Path(new_prefix_path)
+
+    runner_cfg = load_runner_config()
+    changed = False
+    updated_scripts = []
+
+    for script_name, cfg in runner_cfg.items():
+        if cfg.get("runner") != runner_key or cfg.get("prefix_code") != prefix_code:
+            continue
+
+        cfg["prefix_path"] = str(new_resolved)
+        changed = True
+
+        script_path = bashlaunch_dir / f"{script_name}.sh"
+        if not script_path.exists():
+            continue
+
+        folder_path_str = extract_folder_path_from_script(script_path)
+        exe_path_str = extract_exe_path_from_script(script_path)
+        if not folder_path_str or not exe_path_str:
+            continue
+
+        try:
+            folder_resolved = Path(folder_path_str).resolve()
+        except Exception:
+            folder_resolved = Path(folder_path_str)
+        try:
+            exe_resolved = Path(exe_path_str).resolve()
+        except Exception:
+            exe_resolved = Path(exe_path_str)
+
+        # Kalau folder/exe game ini berada didalam prefix lama, ikutkan pindah ke lokasi
+        # baru (path relatifnya dipertahankan persis). Kalau tidak (game diluar prefix,
+        # cuma "menumpang" prefix ini), biarkan path folder/exe-nya seperti semula.
+        try:
+            new_folder = new_resolved / folder_resolved.relative_to(old_resolved)
+        except Exception:
+            new_folder = folder_resolved
+        try:
+            new_exe = new_resolved / exe_resolved.relative_to(old_resolved)
+        except Exception:
+            new_exe = exe_resolved
+
+        new_content = build_script_content(str(new_folder), str(new_exe), cfg)
+        try:
+            script_path.write_text(new_content)
+            script_path.chmod(0o755)
+            updated_scripts.append(script_name)
+        except Exception as e:
+            print(f"Error relinking script '{script_name}' after prefix move: {e}")
+
+    if changed:
+        save_runner_config(runner_cfg)
+    return updated_scripts
+
 def find_owning_prefix(exe_path):
     """Cek apakah exe_path berada didalam salah satu folder prefix (Wine/Proton GE/
     Proton-CachyOS) yang sudah pernah dibuat. Dipakai saat menambahkan game baru (+ ADD):
@@ -633,6 +709,1631 @@ def find_owning_prefix(exe_path):
                 "proton_path": reg_entry.get("proton_path"),
             }
     return None
+
+def list_all_known_prefixes():
+    """Kumpulkan semua prefix yang diketahui (dari prefix_registry.json + hasil scan folder
+    default/kustom untuk masing-masing runner), dipakai oleh dialog manajemen konfigurasi
+    per-prefix (winecfg/explorer/uninstaller/winetricks). Berbeda dengan find_owning_prefix
+    (yang mencari SATU prefix pemilik sebuah exe), fungsi ini mengembalikan SEMUA prefix
+    yang ada, sekaligus nama game/aplikasi mana saja (dari runner_config.json) yang memakai
+    tiap prefix - satu prefix bisa dipakai oleh lebih dari satu game.
+
+    Return list of dict: {"runner", "prefix_code", "prefix_path", "proton_name",
+    "proton_path", "games": [nama_game, ...]}, terurut berdasarkan (runner, prefix_code)."""
+    result = {}
+
+    registry = load_prefix_registry()
+    for entry in registry.values():
+        p = entry.get("prefix_path")
+        r = entry.get("runner")
+        c = entry.get("prefix_code")
+        if p and r and c:
+            result[f"{r}:{c}"] = {
+                "runner": r,
+                "prefix_code": c,
+                "prefix_path": p,
+                "proton_name": entry.get("proton_name"),
+                "proton_path": entry.get("proton_path"),
+            }
+
+    # Tambahan: scan folder default & folder kustom yang sedang aktif, untuk prefix yang
+    # sudah ada di disk tapi belum (atau belum sempat) tercatat di registry.
+    loc_cfg = load_prefix_location_config()
+    scan_roots = [("wine", wine_prefix_root), ("protonge", protonge_prefix_root),
+                  ("protoncachyos", protoncachyos_prefix_root)]
+    for key, _default in list(scan_roots):
+        custom = loc_cfg.get(key)
+        if custom:
+            scan_roots.append((key, Path(custom)))
+
+    for runner_key, base_dir in scan_roots:
+        if not base_dir.is_dir():
+            continue
+        for entry in base_dir.iterdir():
+            if entry.is_dir():
+                key = f"{runner_key}:{entry.name}"
+                if key not in result:
+                    result[key] = {
+                        "runner": runner_key,
+                        "prefix_code": entry.name,
+                        "prefix_path": str(entry),
+                        "proton_name": None,
+                        "proton_path": None,
+                    }
+
+    # Petakan tiap prefix ke nama game/aplikasi yang memakainya, dari runner_config.json
+    # (bisa lebih dari satu game untuk prefix yang sama, mis. game yang lisensinya terikat
+    # ke prefix yang sama lewat find_owning_prefix).
+    games_by_key = {}
+    for script_name, cfg in load_runner_config().items():
+        r = cfg.get("runner")
+        c = cfg.get("prefix_code")
+        if r and c:
+            games_by_key.setdefault(f"{r}:{c}", []).append(script_name)
+
+    for key, entry in result.items():
+        entry["games"] = sorted(games_by_key.get(key, []))
+
+    return sorted(result.values(), key=lambda e: (e["runner"], e["prefix_code"]))
+
+def pick_proton_build_dialog(runner_key, parent=None):
+    """Dialog kecil untuk memilih salah satu build Proton (GE/CachyOS) yang sudah diekstrak.
+    Dipakai saat sebuah prefix Proton belum tercatat memakai versi Proton mana di registry
+    (mis. prefix lama, atau ditemukan lewat scan folder bukan lewat dialog runner biasa).
+
+    parent: window Toplevel modal yang sedang aktif memanggil ini (mis. Prefix Configuration
+    Manager), kalau ada - supaya dialog ini dibuka DIATASnya (bukan dibelakangnya) dan
+    grab-nya diserahkan sementara, lalu dikembalikan lagi setelah dialog ini ditutup.
+
+    Return tuple (build_name, proton_bin_path) atau None jika dibatalkan/tidak ada build."""
+    installs = find_protonge_installations() if runner_key == "protonge" else find_protoncachyos_installations()
+    label = "Proton GE" if runner_key == "protonge" else "Proton-CachyOS"
+
+    if not installs:
+        messagebox.showerror("Error", f"No {label} build found.\nExtract one first via Settings.")
+        return None
+
+    parent_win = parent if (parent is not None and parent.winfo_exists()) else root
+    parent_had_grab = parent is not None and parent.winfo_exists()
+    if parent_had_grab:
+        # Lepas grab modal parent SEMENTARA - kalau tidak, dialog baru ini bisa terbuka
+        # dibelakang parent (yang masih memegang grab) dan jadi tidak bisa diklik sama
+        # sekali (tombol dibelakangnya yang malah "menyala terus" menerima klik).
+        parent.grab_release()
+
+    dialog = tk.Toplevel(parent_win)
+    dialog.title(f"Select {label} Build")
+    dialog.configure(bg=COLORS["primary"])
+    dialog.resizable(False, False)
+    dialog.transient(parent_win)
+    dialog.grab_set()
+    dialog.lift()
+    dialog.focus_force()
+
+    result = {"value": None}
+
+    frame = ttk.Frame(dialog, padding=15)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    ttk.Label(frame,
+              text=f"This prefix has no {label} version recorded yet.\nSelect the build to use for it:",
+              font=FONTS["normal"], justify=tk.LEFT).pack(anchor="w", pady=(0, 10))
+
+    names = [name for name, _ in installs]
+    combo = ttk.Combobox(frame, values=names, state="readonly", width=32, font=FONTS["normal"])
+    combo.current(0)
+    combo.pack(fill=tk.X, pady=(0, 15))
+
+    btn_row = ttk.Frame(frame)
+    btn_row.pack()
+
+    def close_dialog():
+        dialog.destroy()
+        if parent_had_grab and parent.winfo_exists():
+            parent.grab_set()
+            parent.lift()
+            parent.focus_force()
+
+    def do_ok():
+        result["value"] = installs[combo.current()]
+        close_dialog()
+
+    def do_cancel():
+        close_dialog()
+
+    dialog.protocol("WM_DELETE_WINDOW", do_cancel)
+    ttk.Button(btn_row, text="OK", command=do_ok, style="Custom.TButton", width=10).grid(row=0, column=0, padx=5)
+    ttk.Button(btn_row, text="Cancel", command=do_cancel, style="Custom.TButton", width=10).grid(row=0, column=1, padx=5)
+
+    dialog.update_idletasks()
+    x = parent_win.winfo_rootx() + (parent_win.winfo_width() - dialog.winfo_width()) // 2
+    y = parent_win.winfo_rooty() + (parent_win.winfo_height() - dialog.winfo_height()) // 2
+    dialog.geometry(f"+{x}+{y}")
+
+    dialog.wait_window()
+    return result["value"]
+
+def find_proton_wine_binary(proton_script_path):
+    """Cari binary 'wine' asli didalam sebuah build Proton (GE/CachyOS), dari path ke
+    script 'proton'-nya. Dipakai khusus untuk Winetricks: winetricks perlu diarahkan
+    (lewat env WINE) ke wine milik Proton ini, bukan wine sistem, supaya perubahan yang
+    dilakukan benar-benar masuk ke prefix Proton yang dipilih.
+    Return Path ke binary wine64/wine, atau None jika tidak ditemukan."""
+    proton_root = Path(proton_script_path).parent
+    candidates = [
+        proton_root / "files" / "bin" / "wine64",
+        proton_root / "files" / "bin" / "wine",
+        proton_root / "dist" / "bin" / "wine64",
+        proton_root / "dist" / "bin" / "wine",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+def run_prefix_tool(entry, tool="winecfg", extra_args=None, parent=None):
+    """Jalankan sebuah utilitas manajemen ('winecfg', 'explorer', 'uninstaller', atau
+    'winetricks') untuk SATU prefix tertentu - baik itu prefix Wine vanilla ataupun Proton
+    GE/CachyOS - dengan env yang dipasang hanya untuk proses child ini (tidak mengubah env
+    launcher itu sendiri). Untuk prefix Proton yang belum tercatat memakai versi Proton mana,
+    pengguna akan diminta memilih buildnya lewat pick_proton_build_dialog(), lalu pilihan itu
+    disimpan ke registry supaya tidak ditanya lagi lain kali untuk prefix yang sama.
+
+    parent: window Toplevel modal yang sedang aktif memanggilnya (mis. Prefix Configuration
+    Manager) - diteruskan ke pick_proton_build_dialog() supaya dialog pemilihan build itu
+    dibuka DIATAS-nya, bukan dibelakangnya."""
+    runner_key = entry["runner"]
+    prefix_code = entry["prefix_code"]
+    prefix_path = Path(entry["prefix_path"])
+    extra_args = extra_args or []
+
+    if not prefix_path.is_dir():
+        messagebox.showerror("Error", f"Prefix folder not found on disk:\n{prefix_path}")
+        return
+
+    if tool == "winetricks" and shutil.which("winetricks") is None:
+        messagebox.showerror(
+            "Error",
+            "The 'winetricks' command was not found.\n"
+            "Install it first, e.g.:\n"
+            "  sudo apt install winetricks\n"
+            "  sudo dnf install winetricks\n"
+            "  sudo pacman -S winetricks"
+        )
+        return
+
+    env = get_clean_subprocess_env()
+    tool_labels = {"winecfg": "Wine Configuration", "explorer": "Wine Explorer",
+                   "uninstaller": "Uninstaller", "winetricks": "Winetricks"}
+    tool_label = tool_labels.get(tool, tool)
+
+    if runner_key == "wine":
+        env["WINEPREFIX"] = str(prefix_path)
+        if tool == "winecfg":
+            command = ["winecfg"]
+        elif tool == "winetricks":
+            command = ["winetricks"] + extra_args
+        else:
+            command = ["wine", tool]
+        runner_label = "Wine"
+    else:
+        proton_path = entry.get("proton_path")
+        if not proton_path or not Path(proton_path).exists():
+            picked = pick_proton_build_dialog(runner_key, parent=parent)
+            if picked is None:
+                return
+            proton_name, proton_bin = picked
+            proton_path = str(proton_bin)
+            # Simpan pilihan ini ke registry, supaya prefix ini tidak ditanya lagi lain kali.
+            reg = load_prefix_registry()
+            reg[f"{runner_key}:{prefix_code}"] = {
+                "runner": runner_key,
+                "prefix_code": prefix_code,
+                "prefix_path": str(prefix_path),
+                "proton_name": proton_name,
+                "proton_path": proton_path,
+            }
+            save_prefix_registry(reg)
+
+        runner_label = "Proton GE" if runner_key == "protonge" else "Proton-CachyOS"
+
+        if tool == "winetricks":
+            # Prefix Wine SEBENARNYA punya Proton ada di subfolder 'pfx' didalam
+            # STEAM_COMPAT_DATA_PATH - itulah yang harus dipakai sebagai WINEPREFIX,
+            # dan winetricks harus diarahkan ke binary wine milik Proton ini sendiri
+            # (env WINE), bukan wine sistem, atau perubahannya bisa salah sasaran.
+            pfx_path = prefix_path / "pfx"
+            if not pfx_path.is_dir():
+                messagebox.showerror(
+                    "Error",
+                    f"This prefix doesn't have a Wine prefix yet ('pfx' folder missing):\n{pfx_path}\n\n"
+                    "Run this game/app via PLAY or APPS SETUP at least once first, so Proton\n"
+                    "can create it, then try Winetricks again."
+                )
+                return
+
+            wine_bin = find_proton_wine_binary(proton_path)
+            if wine_bin is None:
+                messagebox.showerror(
+                    "Error",
+                    f"Could not find the 'wine' binary inside this Proton build:\n{proton_path}"
+                )
+                return
+
+            env["WINE"] = str(wine_bin)
+            wineserver_bin = wine_bin.parent / "wineserver"
+            if wineserver_bin.exists():
+                env["WINESERVER"] = str(wineserver_bin)
+            env["WINEPREFIX"] = str(pfx_path)
+            command = ["winetricks"] + extra_args
+        else:
+            env["STEAM_COMPAT_DATA_PATH"] = str(prefix_path)
+            env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(find_steam_install_path())
+            command = [proton_path, "run", tool]
+
+    if tool == "winetricks":
+        # Winetricks sering menampilkan progress download (curl/wget) di stdout/stderr dan,
+        # kalau dijalankan tanpa verb, membuka GUI pemilihan komponennya sendiri (zenity/
+        # kdialog) - itu tetap tampil normal karena cuma proses GUI terpisah, tidak
+        # dipengaruhi oleh redirect stdio dibawah ini. Supaya prosesnya (terutama progress
+        # downloadnya) bisa dipantau live, dijalankan lewat pty yang sama dengan yang
+        # dipakai untuk menjalankan game (running_games + jendela Logs), bukan Popen diam-diam.
+        task_key = f"winetricks-{runner_key}-{prefix_code}"
+        log_path = logs_dir / f"{task_key}.log"
+        try:
+            master_fd, slave_fd = pty.openpty()
+            proc = subprocess.Popen(command,
+                                     stdout=slave_fd, stderr=slave_fd, stdin=slave_fd,
+                                     close_fds=True, start_new_session=True, env=env)
+            os.close(slave_fd)
+
+            running_games[task_key] = {
+                "proc": proc,
+                "log_path": log_path,
+                "queue": queue.Queue(),
+                "buffer": [],
+                "window": None,
+                "text_widget": None,
+                "status_label": None,
+                "finished": False,
+            }
+            threading.Thread(target=stream_output, args=(task_key, proc, master_fd, log_path), daemon=True).start()
+            open_log_window(task_key)  # langsung buka jendela log real-time-nya
+            status_label.config(
+                text=f"Running Winetricks for prefix {prefix_code} ({runner_label})...",
+                fg=COLORS["text_secondary"])
+        except FileNotFoundError:
+            messagebox.showerror("Error", f"Command not found: {' '.join(str(c) for c in command)}")
+            status_label.config(text="Error: winetricks command not found.", fg=COLORS["danger"])
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to launch Winetricks:\n{str(e)}")
+            status_label.config(text=f"Error launching Winetricks: {str(e)}", fg=COLORS["danger"])
+        return
+
+    try:
+        subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+        status_label.config(
+            text=f"Opening {tool_label} for prefix {prefix_code} ({runner_label})...",
+            fg=COLORS["text_secondary"])
+    except FileNotFoundError:
+        messagebox.showerror("Error", f"Command not found: {' '.join(str(c) for c in command)}")
+        status_label.config(text="Error: runner command not found.", fg=COLORS["danger"])
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to launch {tool_label}:\n{str(e)}")
+        status_label.config(text=f"Error launching {tool_label}: {str(e)}", fg=COLORS["danger"])
+
+COMMON_WINETRICKS_VERBS = [
+    ("corefonts", "Core Fonts (Arial, Times New Roman, dll)"),
+    ("cjkfonts", "CJK Fonts (China/Jepang/Korea)"),
+    ("vcrun2005", "Visual C++ 2005 Redist"),
+    ("vcrun2008", "Visual C++ 2008 Redist"),
+    ("vcrun2010", "Visual C++ 2010 Redist"),
+    ("vcrun2012", "Visual C++ 2012 Redist"),
+    ("vcrun2013", "Visual C++ 2013 Redist"),
+    ("vcrun2019", "Visual C++ 2015-2019 Redist"),
+    ("vcrun2022", "Visual C++ 2015-2022 Redist"),
+    ("dotnet48", ".NET Framework 4.8"),
+    ("dotnet6", ".NET 6 Runtime"),
+    ("dotnetdesktop6", ".NET 6 Desktop Runtime"),
+    ("d3dx9", "DirectX 9 (d3dx9)"),
+    ("d3dx11_43", "DirectX 11 (d3dx11_43)"),
+    ("d3dcompiler_47", "D3D Compiler 47"),
+    ("xact", "XAudio (xact)"),
+    ("physx", "PhysX"),
+    ("dxvk", "DXVK (DirectX -> Vulkan)"),
+    ("vkd3d", "VKD3D (Direct3D 12 -> Vulkan)"),
+    ("faudio", "FAudio"),
+]
+
+def open_winetricks_dialog(entry, parent_dialog=None):
+    """GUI untuk memilih verb Winetricks umum lewat checkbox (font, redistributable, dotnet,
+    dxvk, dll), plus kolom teks bebas untuk verb tambahan/khusus. Proses instalasinya nanti
+    dijalankan lewat run_prefix_tool(..., tool="winetricks", ...) yang membuka jendela Logs
+    real-time, supaya progress downloadnya kelihatan.
+
+    parent_dialog: window Toplevel modal yang sedang aktif memanggil ini (mis. Prefix
+    Configuration Manager) - dialog ini akan dibuka DIATAS-nya (bukan dibelakangnya, yang
+    tadinya bikin dialog ini "hilang" tertutup parent & tombol yang memanggilnya seperti
+    macet/terus tertekan), dengan grab modal parent dilepas sementara lalu dikembalikan
+    lagi setelah dialog ini ditutup (lewat OK/Cancel maupun tombol close jendela)."""
+    parent_win = parent_dialog if (parent_dialog is not None and parent_dialog.winfo_exists()) else root
+    parent_had_grab = parent_dialog is not None and parent_dialog.winfo_exists()
+    if parent_had_grab:
+        parent_dialog.grab_release()
+
+    dialog = tk.Toplevel(parent_win)
+    dialog.title(f"Winetricks - {entry['prefix_code']}")
+    dialog.configure(bg=COLORS["primary"])
+    dialog.resizable(False, False)
+    dialog.transient(parent_win)
+    dialog.grab_set()
+    dialog.lift()
+    dialog.focus_force()
+
+    frame = ttk.Frame(dialog, padding=15)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    ttk.Label(frame,
+              text=f"Select components to install into prefix '{entry['prefix_code']}':",
+              font=FONTS["normal"]).pack(anchor="w", pady=(0, 10))
+
+    checks_frame = ttk.Frame(frame)
+    checks_frame.pack(fill=tk.BOTH, expand=True)
+
+    check_vars = {}
+    columns = 2
+    for i, (verb, description) in enumerate(COMMON_WINETRICKS_VERBS):
+        var = tk.BooleanVar(value=False)
+        check_vars[verb] = var
+        ttk.Checkbutton(checks_frame, text=f"{verb} - {description}", variable=var,
+                        style="Custom.TCheckbutton").grid(
+            row=i // columns, column=i % columns, sticky="w", padx=(0, 20), pady=2)
+
+    ttk.Label(frame, text="Additional/custom verb(s) (dipisah spasi):",
+              font=FONTS["small"]).pack(anchor="w", pady=(12, 2))
+    custom_entry = ttk.Entry(frame, width=64, font=FONTS["normal"])
+    custom_entry.pack(fill=tk.X, pady=(0, 14))
+
+    btn_row = ttk.Frame(frame)
+    btn_row.pack()
+
+    def close_dialog():
+        dialog.destroy()
+        if parent_had_grab and parent_dialog.winfo_exists():
+            parent_dialog.grab_set()
+            parent_dialog.lift()
+            parent_dialog.focus_force()
+
+    def do_run():
+        verbs = [v for v, var in check_vars.items() if var.get()]
+        custom_text = custom_entry.get().strip()
+        if custom_text:
+            verbs.extend(shlex.split(custom_text))
+        if not verbs:
+            messagebox.showinfo("Info", "Select at least one component, or type a custom verb.")
+            return
+        close_dialog()
+        run_prefix_tool(entry, "winetricks", extra_args=verbs, parent=parent_dialog)
+
+    def do_interactive():
+        # Tanpa verb sama sekali - winetricks akan membuka menu pemilihan komponennya
+        # sendiri (GUI zenity/kdialog bawaannya), tetap lewat jendela Logs yang sama.
+        close_dialog()
+        run_prefix_tool(entry, "winetricks", extra_args=[], parent=parent_dialog)
+
+    dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+    ttk.Button(btn_row, text="Run Selected", style="Custom.TButton", width=14,
+               command=do_run).grid(row=0, column=0, padx=4)
+    ttk.Button(btn_row, text="Open Interactive Menu", style="Custom.TButton", width=18,
+               command=do_interactive).grid(row=0, column=1, padx=4)
+    ttk.Button(btn_row, text="Cancel", style="Custom.TButton", width=10,
+               command=close_dialog).grid(row=0, column=2, padx=4)
+
+    dialog.update_idletasks()
+    x = parent_win.winfo_rootx() + (parent_win.winfo_width() - dialog.winfo_width()) // 2
+    y = parent_win.winfo_rooty() + (parent_win.winfo_height() - dialog.winfo_height()) // 2
+    dialog.geometry(f"+{x}+{y}")
+
+def human_size(num_bytes):
+    """Ubah jumlah byte jadi string yang gampang dibaca (mis. '482.3 MB'), dipakai untuk
+    laporan progress backup/restore."""
+    n = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024.0 or unit == "TB":
+            return f"{int(n)} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{num_bytes} B"
+
+def show_loading_overlay(parent, title="Please Wait", message="Working..."):
+    """Tampilkan jendela loading kecil (spinner tak-tentu/indeterminate) diatas 'parent',
+    dipakai untuk operasi singkat-tapi-bisa-lama yang berjalan di background thread supaya
+    pengguna tahu aplikasi sedang bekerja (bukan macet/freeze) - misalnya saat MEMBUKA arsip
+    backup .tar.gz untuk membaca manifest-nya (tarfile mode 'r:gz' bersifat stream, jadi
+    mencari satu member seperti manifest.json bisa berarti membaca seluruh isi arsip lebih
+    dulu, yang untuk arsip besar bisa memakan waktu beberapa detik).
+
+    Return (win, set_message, close): set_message(text) ganti teks status yang ditampilkan,
+    close() menghentikan animasi & menutup jendelanya. Keduanya HARUS dipanggil dari main
+    thread (mis. lewat root.after / polling queue), sama seperti append_line pada
+    open_task_log_window."""
+    win = tk.Toplevel(parent)
+    win.title(title)
+    win.configure(bg=COLORS["primary"])
+    win.resizable(False, False)
+    win.transient(parent)
+    # Sengaja tidak boleh ditutup manual oleh pengguna selagi operasinya masih berjalan -
+    # supaya tidak ada window "loading" yang ditinggal menggantung tanpa proses dibaliknya.
+    win.protocol("WM_DELETE_WINDOW", lambda: None)
+    win.grab_set()
+
+    frame = ttk.Frame(win, padding=(30, 24))
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    msg_var = tk.StringVar(value=message)
+    ttk.Label(frame, textvariable=msg_var, font=FONTS["normal"],
+              justify=tk.CENTER, wraplength=320).pack(pady=(0, 14))
+
+    bar = ttk.Progressbar(frame, mode="indeterminate", length=280)
+    bar.pack()
+    bar.start(12)
+
+    win.update_idletasks()
+    x = parent.winfo_rootx() + (parent.winfo_width() - win.winfo_width()) // 2
+    y = parent.winfo_rooty() + (parent.winfo_height() - win.winfo_height()) // 2
+    win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    win.lift()
+
+    def set_message(text):
+        if win.winfo_exists():
+            msg_var.set(text)
+
+    closed = {"done": False}
+
+    def close():
+        if closed["done"]:
+            return
+        closed["done"] = True
+        try:
+            bar.stop()
+        except Exception:
+            pass
+        try:
+            win.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+
+    return win, set_message, close
+
+def run_with_loading_overlay(parent, title, message, work_fn, on_done):
+    """Jalankan work_fn() (tanpa argumen) di background thread sambil menampilkan
+    show_loading_overlay() diatas 'parent'. Begitu selesai, jendela loading ditutup dan
+    on_done(result, error) dipanggil di MAIN thread - result berisi apapun yang
+    dikembalikan work_fn(), error berisi exception jika work_fn() melempar satu (None kalau
+    sukses). Dipakai supaya operasi blocking singkat (mis. membuka & membaca manifest arsip
+    backup) tidak membekukan UI tanpa indikasi apapun ke pengguna."""
+    _, set_message, close_overlay = show_loading_overlay(parent, title=title, message=message)
+    result_box = {}
+
+    def worker():
+        try:
+            result_box["result"] = work_fn()
+        except Exception as e:
+            result_box["error"] = e
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def poll():
+        if "result" in result_box or "error" in result_box:
+            close_overlay()
+            on_done(result_box.get("result"), result_box.get("error"))
+        else:
+            root.after(100, poll)
+
+    root.after(100, poll)
+
+def open_task_log_window(title, modal_parent=None):
+    """Buka jendela log sederhana untuk task Python di background thread (backup/restore) -
+    beda dari open_log_window yang khusus untuk proses via pty (game/winetricks).
+    Return (append_line, win): append_line(text) aman dipanggil dari thread manapun untuk
+    menambah satu baris ke jendela log ini (lewat queue, dipoll oleh main thread/Tk).
+
+    modal_parent: dialog Toplevel lain (mis. Prefix Configuration Manager) yang mungkin
+    sedang memegang grab_set() aktif. Kalau diisi, grab itu DILEPAS dulu supaya jendela log
+    ini (yang tidak modal) benar-benar bisa diklik - tanpa ini, tombol "Close" (dan semua
+    isi jendela log ini) tidak akan merespon klik sama sekali selama modal_parent masih
+    memegang grab, memaksa pengguna menutupnya lewat window manager. Grab itu otomatis
+    dikembalikan ke modal_parent begitu jendela log ini ditutup (lewat tombol Close ATAU
+    lewat tombol close window manager)."""
+    if modal_parent is not None and modal_parent.winfo_exists():
+        try:
+            modal_parent.grab_release()
+        except tk.TclError:
+            pass
+
+    win = tk.Toplevel(root)
+    win.title(title)
+    win.configure(bg=COLORS["primary"])
+    win.geometry("800x480")
+    win.minsize(480, 300)
+
+    frame = ttk.Frame(win, padding=10)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    # Progress bar + label persentase - dipakai supaya pengguna langsung lihat seberapa jauh
+    # proses backup/restore-nya (bukan cuma baris log berjalan) dan tahu aplikasinya masih
+    # bekerja, bukan macet. Dimulai dalam mode "indeterminate" (animasi bolak-balik) karena
+    # totalnya belum diketahui saat jendela ini pertama dibuka (mis. masih menghitung ukuran
+    # total); dipindah ke mode "determinate" begitu total sudah diketahui lewat set_progress().
+    progress_row = ttk.Frame(frame)
+    progress_row.pack(fill=tk.X, pady=(0, 8))
+    progress_bar = ttk.Progressbar(progress_row, mode="indeterminate")
+    progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    progress_bar.start(12)
+    progress_pct_label = ttk.Label(progress_row, text="", font=FONTS["small"], width=6, anchor="e")
+    progress_pct_label.pack(side=tk.LEFT, padx=(8, 0))
+
+    text_frame = ttk.Frame(frame)
+    text_frame.pack(fill=tk.BOTH, expand=True)
+    scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL)
+    scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    text_widget = tk.Text(text_frame, wrap=tk.NONE, state="disabled",
+                           bg=COLORS["text_background"], fg=COLORS["text"],
+                           insertbackground=COLORS["text"], font=("Courier", 9),
+                           yscrollcommand=scroll.set)
+    text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scroll.config(command=text_widget.yview)
+
+    def on_close():
+        win.destroy()
+        if modal_parent is not None and modal_parent.winfo_exists():
+            try:
+                modal_parent.grab_set()
+                modal_parent.lift()
+                modal_parent.focus_force()
+            except tk.TclError:
+                pass
+
+    close_row = ttk.Frame(frame)
+    close_row.pack(pady=(8, 0))
+    ttk.Button(close_row, text="Close", command=on_close, style="Custom.TButton", width=12).pack()
+    win.protocol("WM_DELETE_WINDOW", on_close)
+
+    line_queue = queue.Queue()
+    # Cuma menyimpan progress TERBARU (bukan queue) - progress bisa di-update sangat sering
+    # (tiap file diarsipkan/diekstrak), jadi yang penting hanya nilai paling akhir tiap kali
+    # UI di-poll, bukan riwayat semuanya. dict assignment/read ini aman dipanggil lintas
+    # thread untuk kebutuhan sederhana seperti ini (GIL Python).
+    latest_progress = {"value": None}  # None = belum ada update / masih indeterminate
+
+    def poll():
+        try:
+            while True:
+                line = line_queue.get_nowait()
+                text_widget.config(state="normal")
+                text_widget.insert(tk.END, line + "\n")
+                text_widget.see(tk.END)
+                text_widget.config(state="disabled")
+        except queue.Empty:
+            pass
+
+        pct = latest_progress["value"]
+        if pct is not None and win.winfo_exists():
+            if str(progress_bar["mode"]) != "determinate":
+                progress_bar.stop()
+                progress_bar.config(mode="determinate", maximum=100)
+            progress_bar["value"] = pct
+            progress_pct_label.config(text=f"{pct:.0f}%")
+
+        if win.winfo_exists():
+            win.after(150, poll)
+
+    poll()
+
+    def append_line(text):
+        line_queue.put(text)
+
+    def set_progress(percent):
+        """Update progress bar ke nilai persentase (0-100). Aman dipanggil dari thread
+        manapun - nilainya dibaca & diterapkan ke widget oleh poll() di main thread."""
+        latest_progress["value"] = max(0.0, min(100.0, percent))
+
+    win.update_idletasks()
+    x = root.winfo_rootx() + 60
+    y = root.winfo_rooty() + 60
+    win.geometry(f"+{x}+{y}")
+
+    return append_line, set_progress, win
+
+def gather_prefix_backup_info(entry):
+    """Kumpulkan info yang dibutuhkan untuk backup: folder tiap game (dari script .sh-nya)
+    plus launch_options/comment (dari runner_config.json). Game yang folder-nya sudah tidak
+    ada di disk dilaporkan lewat 'missing' supaya bisa diperingatkan ke pengguna SEBELUM
+    backup jalan, bukan gagal ditengah proses.
+
+    Juga dideteksi apakah folder game itu berada DIDALAM folder prefix-nya sendiri
+    ('inside_prefix') - ini kasus umum untuk game yang di-install lewat installer Windows
+    (mis. GOG) langsung ke drive_c prefix. Untuk game seperti ini, filenya SUDAH ikut
+    kearsipkan lewat folder prefix, jadi tidak perlu (dan tidak boleh) diarsipkan lagi
+    secara terpisah - itu hanya akan menggandakan ukuran backup 2x tanpa manfaat.
+
+    Return list of dict: {"script_name", "folder_path" (Path atau None), "exe_path" (str atau
+    None), "relative_exe" (str atau None - exe_path relatif ke folder_path kalau memungkinkan,
+    dipakai supaya restore bisa membangun ulang path exe di lokasi baru), "inside_prefix" (bool),
+    "relative_to_prefix" (str atau None - folder_path relatif ke prefix_path, kalau
+    inside_prefix True), "launch_options", "comment", "missing" (bool), "icon_path" (Path atau
+    None - lokasi file icon custom game ini kalau ada), "has_icon" (bool)}."""
+    cfg = load_runner_config()
+    prefix_path = Path(entry["prefix_path"])
+    try:
+        prefix_resolved = prefix_path.resolve()
+    except Exception:
+        prefix_resolved = prefix_path
+
+    games_info = []
+    for script_name in entry.get("games") or []:
+        script_path = bashlaunch_dir / f"{script_name}.sh"
+        folder_path_str = extract_folder_path_from_script(script_path)
+        exe_path_str = extract_exe_path_from_script(script_path)
+        folder_path = Path(folder_path_str) if folder_path_str else None
+
+        relative_exe = None
+        if folder_path and exe_path_str:
+            try:
+                relative_exe = str(Path(exe_path_str).resolve().relative_to(folder_path.resolve()))
+            except Exception:
+                relative_exe = None
+
+        inside_prefix = False
+        relative_to_prefix = None
+        if folder_path and folder_path.is_dir():
+            try:
+                relative_to_prefix = str(folder_path.resolve().relative_to(prefix_resolved))
+                inside_prefix = True
+            except Exception:
+                inside_prefix = False
+
+        game_cfg = cfg.get(script_name, {})
+        icon_path = icon_dir / f"{script_name}.png"
+        games_info.append({
+            "script_name": script_name,
+            "folder_path": folder_path,
+            "exe_path": exe_path_str,
+            "relative_exe": relative_exe,
+            "inside_prefix": inside_prefix,
+            "relative_to_prefix": relative_to_prefix,
+            "launch_options": game_cfg.get("launch_options", ""),
+            "comment": game_cfg.get("comment", ""),
+            "missing": not (folder_path and folder_path.is_dir()),
+            "icon_path": icon_path,
+            "has_icon": icon_path.is_file(),
+        })
+    return games_info
+
+def compute_total_size(paths):
+    """Jumlahkan ukuran (bytes) semua file didalam list path (file atau folder, folder
+    di-walk rekursif). Dipakai SEBELUM proses tar.add()/extract() dimulai supaya progress
+    backup/restore bisa ditampilkan sebagai persentase (bytes diproses / total bytes),
+    bukan cuma jumlah file yang terus bertambah tanpa tahu berapa totalnya. Error per-file
+    (mis. broken symlink) diabaikan supaya penghitungan total tidak gagal gara-gara satu file
+    bermasalah - file itu tetap akan dicoba diarsipkan/diekstrak seperti biasa nantinya."""
+    total = 0
+    for p in paths:
+        if p is None:
+            continue
+        p = Path(p)
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+            elif p.is_dir():
+                for root_dir, _dirs, files in os.walk(p):
+                    for fname in files:
+                        try:
+                            total += (Path(root_dir) / fname).stat().st_size
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+    return total
+
+def run_backup_worker(entry, games_info, dest_path, append_line, set_progress):
+    """Berjalan di background thread: bikin satu arsip .tar.gz berisi folder prefix + folder
+    tiap game yang masih ada di disk, plus manifest.json (dipakai run_restore_worker() untuk
+    membangun ulang semuanya - prefix, script game, runner_config - dilain waktu/komputer)."""
+    prefix_path = Path(entry["prefix_path"])
+    counters = {"count": 0, "bytes": 0}
+    last_report = [0.0]
+
+    # Hitung dulu total ukuran yang akan diarsipkan supaya progress bar bisa ditampilkan
+    # sebagai persentase yang berarti (bukan cuma spinner tak-tentu) selama proses tar.add()
+    # dibawah - langkah ini sendiri hanya melakukan stat() per file (cepat), bukan membaca
+    # isi filenya, jadi jauh lebih ringan dibanding proses pengarsipan (kompresi) sesudahnya.
+    append_line("Calculating total size to back up...")
+    size_sources = [prefix_path]
+    size_sources += [g["folder_path"] for g in games_info if not g["inside_prefix"]]
+    size_sources += [g["icon_path"] for g in games_info if g["has_icon"]]
+    total_bytes = compute_total_size(size_sources)
+    append_line(f"Total size: {human_size(total_bytes)}" if total_bytes else "Total size: unknown")
+    append_line("")
+
+    def progress_filter(tarinfo):
+        counters["count"] += 1
+        if tarinfo.size and tarinfo.size > 0:
+            counters["bytes"] += tarinfo.size
+        now = time.time()
+        if now - last_report[0] > 0.2 or counters["count"] <= 3:
+            append_line(f"[{counters['count']:>6} files, {human_size(counters['bytes'])}] {tarinfo.name}")
+            last_report[0] = now
+            if total_bytes > 0:
+                set_progress(min(counters["bytes"], total_bytes) / total_bytes * 100)
+        return tarinfo
+
+    manifest = {
+        "format_version": 2,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "runner": entry["runner"],
+        "prefix_code": entry["prefix_code"],
+        "games": [
+            {
+                "script_name": g["script_name"],
+                "relative_exe": g["relative_exe"],
+                "exe_path": g["exe_path"],
+                "launch_options": g["launch_options"],
+                "comment": g["comment"],
+                "inside_prefix": g["inside_prefix"],
+                "relative_to_prefix": g["relative_to_prefix"],
+                "has_icon": g["has_icon"],
+            }
+            for g in games_info
+        ],
+    }
+
+    tmp_manifest_path = None
+    try:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        tmp_fd, tmp_manifest_name = tempfile.mkstemp(prefix="wlm_manifest_", suffix=".json")
+        os.close(tmp_fd)
+        tmp_manifest_path = Path(tmp_manifest_name)
+        tmp_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+        append_line("Archiving prefix files...")
+        with tarfile.open(dest_path, "w:gz") as tar:
+            tar.add(str(prefix_path), arcname="prefix", filter=progress_filter)
+            for g in games_info:
+                if g["inside_prefix"]:
+                    # Folder game ini sudah ikut terarsipkan lewat "prefix" diatas (mis. game
+                    # GOG yang terinstall langsung ke drive_c prefix) - JANGAN diarsipkan lagi
+                    # secara terpisah, supaya ukuran backup tidak dobel 2x untuk data yang sama.
+                    append_line(f"Skipping separate archive for '{g['script_name']}' "
+                                f"(already included inside the prefix folder).")
+                    continue
+                append_line(f"Archiving game files: {g['script_name']}...")
+                tar.add(str(g["folder_path"]), arcname=f"games/{g['script_name']}", filter=progress_filter)
+            for g in games_info:
+                if g["has_icon"]:
+                    append_line(f"Archiving icon for '{g['script_name']}'...")
+                    tar.add(str(g["icon_path"]), arcname=f"icons/{g['script_name']}.png", filter=progress_filter)
+            tar.add(str(tmp_manifest_path), arcname="manifest.json")
+
+        set_progress(100)
+        append_line("")
+        append_line(f"Done. {counters['count']} files, {human_size(counters['bytes'])} total.")
+        append_line(f"Backup saved to: {dest_path}")
+        root.after(0, lambda: status_label.config(
+            text=f"Backup of '{entry['prefix_code']}' saved to {dest_path}", fg=COLORS["success"]))
+    except Exception as e:
+        err = str(e)
+        append_line("")
+        append_line(f"ERROR: {err}")
+        root.after(0, lambda: messagebox.showerror("Backup Failed", f"Backup failed:\n{err}"))
+        root.after(0, lambda: status_label.config(text=f"Backup failed: {err}", fg=COLORS["danger"]))
+    finally:
+        if tmp_manifest_path is not None:
+            try:
+                tmp_manifest_path.unlink()
+            except Exception:
+                pass
+
+def open_backup_prefix_dialog(entry, parent_dialog=None):
+    """Minta konfirmasi & lokasi file backup, lalu jalankan proses backup (prefix + folder
+    game-game yang memakainya) di background thread dengan jendela log real-time (progress
+    pengarsipan file per file kelihatan langsung)."""
+    parent_win = parent_dialog if (parent_dialog is not None and parent_dialog.winfo_exists()) else root
+
+    prefix_path = Path(entry["prefix_path"])
+    if not prefix_path.is_dir():
+        messagebox.showerror("Error", f"Prefix folder not found on disk:\n{prefix_path}", parent=parent_win)
+        return
+
+    games_info = gather_prefix_backup_info(entry)
+
+    lines = [f"Prefix: {entry['prefix_code']} ({RUNNER_DISPLAY_NAMES.get(entry['runner'], entry['runner'])})",
+             f"Location: {prefix_path}", ""]
+    if games_info:
+        lines.append("Game(s) that will be included:")
+        for g in games_info:
+            if g["missing"]:
+                tag = "  (folder not found on disk - will be SKIPPED)"
+            elif g["inside_prefix"]:
+                tag = "  (already inside the prefix - no extra space needed)"
+            else:
+                tag = "  (backed up separately)"
+            lines.append(f"  - {g['script_name']}{tag}")
+    else:
+        lines.append("No game is currently linked to this prefix - only the prefix itself will be backed up.")
+    lines.append("")
+    lines.append("This can take a while and produce a large file depending on the game size. Continue?")
+
+    if not messagebox.askyesno("Confirm Backup", "\n".join(lines), parent=parent_win):
+        return
+
+    default_name = f"backup_{entry['prefix_code']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tar.gz"
+    dest = filedialog.asksaveasfilename(
+        title="Save Backup As",
+        initialfile=default_name,
+        defaultextension=".tar.gz",
+        filetypes=[("Backup Archive", "*.tar.gz"), ("All Files", "*.*")],
+        parent=parent_win
+    )
+    if not dest:
+        return
+    dest_path = Path(dest)
+
+    games_info = [g for g in games_info if not g["missing"]]
+
+    # Kalau dipanggil dari Prefix Configuration Manager (yang modal/grab_set()), lepas
+    # grab-nya selagi jendela log ini terbuka - lihat docstring open_task_log_window.
+    modal_parent = parent_dialog if (parent_dialog is not None and parent_dialog.winfo_exists()) else None
+    append_line, set_progress, win = open_task_log_window(f"Backup - {entry['prefix_code']}",
+                                                            modal_parent=modal_parent)
+    append_line(f"Starting backup of prefix '{entry['prefix_code']}'...")
+    append_line(f"Destination: {dest_path}")
+    append_line("")
+
+    threading.Thread(target=run_backup_worker,
+                      args=(entry, games_info, dest_path, append_line, set_progress),
+                      daemon=True).start()
+
+def run_restore_worker(archive_path, manifest, runner_key, prefix_code, target_prefix_path,
+                        games_dest_base, append_line, set_progress, total_size=0):
+    """Berjalan di background thread: ekstrak folder prefix & folder tiap game dari arsip
+    backup, lalu daftarkan sebagai prefix/game baru di launcher ini (script .sh baru,
+    runner_config.json, prefix_registry.json).
+
+    total_size: total bytes yang akan diekstrak (dihitung sebelumnya saat manifest dibaca,
+    lihat open_restore_backup_dialog), dipakai untuk menampilkan progress bar sebagai
+    persentase. 0/tidak diketahui berarti progress bar tetap dalam mode indeterminate.
+
+    Versi Proton (proton_path) SENGAJA tidak diikutkan dari mesin lama - proton_path itu
+    hanya valid dikomputer asalnya. Nanti akan ditanya otomatis (lewat pick_proton_build_dialog,
+    fitur yang sudah ada) begitu prefix ini pertama kali dipakai lewat winecfg/explorer/
+    uninstaller/winetricks/PLAY di komputer ini."""
+    games = manifest.get("games") or []
+    extracted_count = [0]
+    extracted_bytes = [0]
+    last_report = [0.0]
+
+    def extract_members(tar, member_prefix, dest_dir):
+        matched = [m for m in tar.getmembers() if m.name.startswith(member_prefix)]
+        for m in matched:
+            rel = m.name[len(member_prefix):]
+            if not rel:
+                continue  # entri direktori teratasnya sendiri - sudah dibuat lewat mkdir
+            extracted_count[0] += 1
+            if m.size:
+                extracted_bytes[0] += m.size
+            now = time.time()
+            if now - last_report[0] > 0.2 or extracted_count[0] <= 3:
+                append_line(f"[{extracted_count[0]:>6}] {rel}")
+                last_report[0] = now
+                if total_size > 0:
+                    set_progress(min(extracted_bytes[0], total_size) / total_size * 100)
+            m.name = rel  # ekstrak relatif ke dest_dir, bukan ke path lengkap didalam arsip
+            try:
+                tar.extract(m, path=str(dest_dir), filter="fully_trusted")
+            except TypeError:
+                # Python <3.12 belum punya parameter 'filter' untuk extract().
+                tar.extract(m, path=str(dest_dir))
+
+    try:
+        target_prefix_path.mkdir(parents=True, exist_ok=True)
+
+        external_games = [g for g in games if not g.get("inside_prefix")]
+        inside_games = [g for g in games if g.get("inside_prefix")]
+
+        with tarfile.open(archive_path, "r:gz") as tar:
+            append_line("Extracting prefix files...")
+            extract_members(tar, "prefix/", target_prefix_path)
+
+            game_dest_map = {}
+            if external_games and games_dest_base:
+                games_dest_base.mkdir(parents=True, exist_ok=True)
+                for g in external_games:
+                    script_name = g["script_name"]
+                    game_dir = games_dest_base / script_name
+                    append_line(f"Extracting game files: {script_name}...")
+                    extract_members(tar, f"games/{script_name}/", game_dir)
+                    game_dest_map[script_name] = game_dir
+
+            for g in inside_games:
+                # Sudah ikut terekstrak lewat "prefix/" diatas - tidak perlu ekstraksi
+                # terpisah, sesuai bagaimana file itu diarsipkan (lihat run_backup_worker).
+                append_line(f"'{g['script_name']}' is already inside the restored prefix "
+                            f"- no separate extraction needed.")
+                rel_to_prefix = g.get("relative_to_prefix") or ""
+                game_dest_map[g["script_name"]] = (target_prefix_path / rel_to_prefix) if rel_to_prefix else target_prefix_path
+
+            # Ekstrak icon custom tiap game (kalau ada) - backup lama (dibuat sebelum fitur
+            # ini ada) tidak akan punya "has_icon"/entri "icons/..." sama sekali di arsipnya,
+            # jadi cukup dilewati saja untuk game itu (bukan error) lewat .get() + getmember().
+            for g in games:
+                if not g.get("has_icon"):
+                    continue
+                script_name = g["script_name"]
+                member_name = f"icons/{script_name}.png"
+                try:
+                    member = tar.getmember(member_name)
+                except KeyError:
+                    continue
+                append_line(f"Extracting icon for '{script_name}'...")
+                icon_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    with tar.extractfile(member) as src, open(icon_dir / f"{script_name}.png", "wb") as dst:
+                        dst.write(src.read())
+                except Exception as e:
+                    append_line(f"WARNING: could not restore icon for '{script_name}': {e}")
+
+        # Daftarkan prefix ke registry - proton_path/proton_name dikosongkan dengan sengaja
+        # (lihat docstring diatas).
+        record_prefix_usage(runner_key, prefix_code, target_prefix_path,
+                             proton_name=None, proton_path=None)
+
+        # Daftarkan tiap game: bangun ulang script .sh + entry runner_config.json-nya.
+        runner_cfg = load_runner_config()
+        for g in games:
+            script_name = g["script_name"]
+            game_dir = game_dest_map.get(script_name)
+            if game_dir is None:
+                continue
+
+            relative_exe = g.get("relative_exe")
+            if relative_exe:
+                exe_path = str(game_dir / relative_exe)
+            else:
+                # Tidak ada relative_exe tercatat (mis. exe-nya ada diluar folder game) -
+                # pakai path exe lama sebagai fallback; kemungkinan besar perlu diperbaiki
+                # manual lewat Edit/Rename game ini kalau path itu tidak ada dikomputer ini.
+                exe_path = g.get("exe_path") or ""
+                append_line(f"WARNING: could not determine the .exe location for "
+                            f"'{script_name}' automatically - please check/fix it manually.")
+
+            choice = {
+                "runner": runner_key,
+                "proton_name": None,
+                "proton_path": "",
+                "prefix_code": prefix_code,
+                "prefix_path": str(target_prefix_path),
+                "launch_options": g.get("launch_options", ""),
+                "comment": g.get("comment", ""),
+            }
+            runner_cfg[script_name] = choice
+
+            script_path = bashlaunch_dir / f"{script_name}.sh"
+            script_content = build_script_content(str(game_dir), exe_path, choice)
+            script_path.write_text(script_content)
+            try:
+                script_path.chmod(0o755)
+            except Exception:
+                pass
+
+        save_runner_config(runner_cfg)
+
+        set_progress(100)
+        append_line("")
+        append_line("Restore completed successfully.")
+        if runner_key != "wine":
+            append_line("Note: this prefix's Proton build was not carried over from the old machine -")
+            append_line("you'll be asked to pick a locally installed Proton build the first time you")
+            append_line("use Winecfg/Explorer/Winetricks/PLAY for it.")
+        root.after(0, lambda: status_label.config(
+            text=f"Restore of '{prefix_code}' completed.", fg=COLORS["success"]))
+        root.after(0, update_script_list)
+    except Exception as e:
+        err = str(e)
+        append_line("")
+        append_line(f"ERROR: {err}")
+        root.after(0, lambda: messagebox.showerror("Restore Failed", f"Restore failed:\n{err}"))
+        root.after(0, lambda: status_label.config(text=f"Restore failed: {err}", fg=COLORS["danger"]))
+
+def open_restore_backup_dialog(parent_dialog=None):
+    """Pilih file backup (.tar.gz), baca manifest-nya, lalu tampilkan dialog untuk memilih
+    kode/lokasi tujuan prefix & folder game sebelum benar-benar mengekstrak & mendaftarkannya
+    sebagai prefix/game baru di launcher ini (lihat run_restore_worker)."""
+    parent_win = parent_dialog if (parent_dialog is not None and parent_dialog.winfo_exists()) else root
+
+    archive_path = filedialog.askopenfilename(
+        title="Select Backup Archive",
+        filetypes=[("Backup Archive", "*.tar.gz *.tgz"), ("All Files", "*.*")],
+        parent=parent_win
+    )
+    if not archive_path:
+        return
+    archive_path = Path(archive_path)
+
+    def read_archive():
+        # tarfile mode "r:gz" bersifat stream (tidak bisa seek bebas seperti file biasa),
+        # jadi mencari member "manifest.json" - yang ditulis PALING TERAKHIR saat backup
+        # dibuat (lihat run_backup_worker) - berarti seluruh isi arsip harus dibaca dulu dari
+        # awal. Untuk arsip besar ini bisa memakan waktu nyata, makanya dijalankan di
+        # background thread (lewat run_with_loading_overlay) supaya UI tidak membeku tanpa
+        # indikasi apapun. getmembers() dipanggil lagi setelahnya untuk menghitung total
+        # ukuran (dipakai progress bar saat restore nanti) - ini praktis gratis karena
+        # tarfile sudah menge-cache daftar member itu sejak pencarian manifest.json diatas.
+        with tarfile.open(archive_path, "r:gz") as tar:
+            manifest_member = tar.extractfile("manifest.json")
+            if manifest_member is None:
+                raise ValueError("manifest.json not found inside the archive.")
+            manifest_data = json.loads(manifest_member.read().decode("utf-8"))
+            total_size = sum(m.size for m in tar.getmembers()
+                              if m.isfile() and (m.name.startswith("prefix/")
+                                                  or m.name.startswith("games/")))
+        return manifest_data, total_size
+
+    def on_archive_read(result, error):
+        if error is not None:
+            messagebox.showerror("Error", f"Failed to read backup archive:\n{error}", parent=parent_win)
+            return
+        manifest, total_size = result
+        show_restore_options_dialog(manifest, total_size)
+
+    run_with_loading_overlay(parent_win, title="Opening Backup",
+                              message=f"Reading {archive_path.name}...",
+                              work_fn=read_archive, on_done=on_archive_read)
+
+    def show_restore_options_dialog(manifest, total_size):
+        """Dipanggil sesudah manifest arsip backup berhasil dibaca (lihat
+        open_restore_backup_dialog/read_archive) - tampilkan dialog pilihan tujuan restore lalu,
+        kalau dikonfirmasi, jalankan proses ekstraksi sesungguhnya lewat run_restore_worker."""
+        runner_key = manifest.get("runner")
+        if runner_key not in ("wine", "protonge", "protoncachyos"):
+            messagebox.showerror("Error", "This backup file's format is not recognized/supported.", parent=parent_win)
+            return
+
+        orig_prefix_code = manifest.get("prefix_code") or "RestoredPrefix"
+        games = manifest.get("games") or []
+        external_games = [g for g in games if not g.get("inside_prefix")]
+        inside_games = [g for g in games if g.get("inside_prefix")]
+
+        # Kalau kode prefix aslinya sudah dipakai prefix lain dimesin ini, sarankan kode
+        # GAMEXXX berikutnya yang masih kosong (tetap mengikuti pola penamaan GAME001,
+        # GAME002, dst yang dipakai konsisten diseluruh launcher) - bukan malah membiarkan
+        # dua prefix berbeda berbagi nama folder yang sama.
+        known_codes = set()
+        for cfg in load_runner_config().values():
+            if cfg.get("prefix_code"):
+                known_codes.add(cfg["prefix_code"])
+        for reg_entry in load_prefix_registry().values():
+            if reg_entry.get("prefix_code"):
+                known_codes.add(reg_entry["prefix_code"])
+        suggested_code = orig_prefix_code if orig_prefix_code not in known_codes else generate_next_prefix_code(runner_key)
+
+        parent_had_grab = parent_dialog is not None and parent_dialog.winfo_exists()
+        if parent_had_grab:
+            parent_dialog.grab_release()
+
+        dialog = tk.Toplevel(parent_win)
+        dialog.title("Restore Backup")
+        dialog.configure(bg=COLORS["primary"])
+        dialog.resizable(False, False)
+        dialog.transient(parent_win)
+        dialog.grab_set()
+        dialog.lift()
+        dialog.focus_force()
+
+        frame = ttk.Frame(dialog, padding=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text=f"Archive: {archive_path.name}", font=FONTS["subtitle"]).pack(anchor="w")
+        ttk.Label(frame, text=f"Runner: {RUNNER_DISPLAY_NAMES.get(runner_key, runner_key)}",
+                  font=FONTS["normal"]).pack(anchor="w", pady=(4, 0))
+
+        if games:
+            desc_lines = []
+            if inside_games:
+                desc_lines.append("Included inside the prefix (no extra folder needed): "
+                                   + ", ".join(g["script_name"] for g in inside_games))
+            if external_games:
+                desc_lines.append("Stored separately, needs its own destination folder: "
+                                   + ", ".join(g["script_name"] for g in external_games))
+            ttk.Label(frame, text="\n".join(desc_lines), font=FONTS["small"],
+                      wraplength=560, justify=tk.LEFT).pack(anchor="w", pady=(4, 10))
+        else:
+            ttk.Label(frame, text="This backup contains only the prefix (no game linked).",
+                      font=FONTS["small"]).pack(anchor="w", pady=(4, 10))
+
+        ttk.Label(frame, text="Prefix code (folder name) for the restored prefix:",
+                  font=FONTS["normal"]).pack(anchor="w")
+        code_entry = ttk.Entry(frame, width=40, font=FONTS["normal"])
+        code_entry.insert(0, suggested_code)
+        code_entry.pack(fill=tk.X, pady=(2, 2))
+        if suggested_code != orig_prefix_code:
+            ttk.Label(frame, text=f"Original code was '{orig_prefix_code}', already used on this machine - "
+                                  f"'{suggested_code}' suggested instead. You can still change it.",
+                      font=FONTS["small"], wraplength=560, justify=tk.LEFT).pack(anchor="w", pady=(0, 8))
+        else:
+            ttk.Frame(frame, height=8).pack()
+
+        default_root = {"wine": wine_prefix_root, "protonge": protonge_prefix_root,
+                         "protoncachyos": protoncachyos_prefix_root}[runner_key]
+        loc_cfg = load_prefix_location_config()
+        default_root = Path(loc_cfg.get(runner_key) or default_root)
+
+        ttk.Label(frame, text="Restore prefix into folder:", font=FONTS["normal"]).pack(anchor="w")
+        prefix_dest_row = ttk.Frame(frame)
+        prefix_dest_row.pack(fill=tk.X, pady=(2, 10))
+        prefix_dest_var = tk.StringVar(value=str(default_root))
+        ttk.Entry(prefix_dest_row, textvariable=prefix_dest_var, font=FONTS["normal"]).pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+
+        def browse_prefix_dest():
+            chosen = filedialog.askdirectory(title="Choose folder to restore the prefix into",
+                                              initialdir=prefix_dest_var.get(), parent=dialog)
+            if chosen:
+                prefix_dest_var.set(chosen)
+
+        ttk.Button(prefix_dest_row, text="Browse...", style="Custom.TButton", width=10,
+                   command=browse_prefix_dest).pack(side=tk.LEFT, padx=(6, 0))
+
+        # Folder tujuan terpisah untuk game HANYA ditanyakan kalau memang ada game yang
+        # filenya disimpan terpisah dari prefix di backup ini. Kalau semua game backup ini
+        # sudah termasuk didalam prefix (kasus paling umum, mis. game GOG), bagian ini
+        # dilewati sepenuhnya - tinggal restore prefix-nya saja, game ikut otomatis.
+        games_dest_var = tk.StringVar(value=str(Path.home() / "RestoredGames"))
+        if external_games:
+            ttk.Label(frame, text="Restore game file(s) into folder (each game gets its own subfolder):",
+                      font=FONTS["normal"]).pack(anchor="w")
+            games_dest_row = ttk.Frame(frame)
+            games_dest_row.pack(fill=tk.X, pady=(2, 10))
+            ttk.Entry(games_dest_row, textvariable=games_dest_var, font=FONTS["normal"]).pack(
+                side=tk.LEFT, fill=tk.X, expand=True)
+
+            def browse_games_dest():
+                chosen = filedialog.askdirectory(title="Choose folder to restore game file(s) into",
+                                                  initialdir=games_dest_var.get(), parent=dialog)
+                if chosen:
+                    games_dest_var.set(chosen)
+
+            ttk.Button(games_dest_row, text="Browse...", style="Custom.TButton", width=10,
+                       command=browse_games_dest).pack(side=tk.LEFT, padx=(6, 0))
+
+        btn_row = ttk.Frame(frame)
+        btn_row.pack(pady=(6, 0))
+
+        def close_dialog(reacquire_parent_grab=True):
+            dialog.destroy()
+            # reacquire_parent_grab=False dipakai saat lanjut ke proses restore (do_restore) -
+            # grab parent_dialog SENGAJA belum dikembalikan disini; open_task_log_window yang
+            # akan segera dibuka butuh grab itu tetap terlepas selama jendela log-nya terbuka
+            # (lihat docstring open_task_log_window untuk alasannya).
+            if reacquire_parent_grab and parent_had_grab and parent_dialog.winfo_exists():
+                parent_dialog.grab_set()
+                parent_dialog.lift()
+                parent_dialog.focus_force()
+
+        def do_restore():
+            prefix_code = code_entry.get().strip()
+            if not prefix_code:
+                messagebox.showinfo("Info", "Prefix code cannot be empty.", parent=dialog)
+                return
+            prefix_dest_base_str = prefix_dest_var.get().strip()
+            if not prefix_dest_base_str:
+                messagebox.showinfo("Info", "Please choose a destination folder for the prefix.", parent=dialog)
+                return
+            target_prefix_path = Path(prefix_dest_base_str) / prefix_code
+
+            conflicting_scripts = [g["script_name"] for g in games
+                                    if (bashlaunch_dir / f"{g['script_name']}.sh").exists()]
+            if conflicting_scripts and not messagebox.askyesno(
+                "Replace Existing Game(s)?",
+                "The following game(s) already exist in this launcher (their launch script &\n"
+                "runner settings will be REPLACED by this backup):\n\n"
+                + "\n".join(f"  - {s}" for s in conflicting_scripts) + "\n\nReplace them?",
+                parent=dialog
+            ):
+                return
+
+            if target_prefix_path.exists() and any(target_prefix_path.iterdir()):
+                if not messagebox.askyesno(
+                    "Replace Existing Prefix?",
+                    f"A prefix folder already exists at:\n{target_prefix_path}\n\n"
+                    "Its contents will be REPLACED/overwritten by the files from this backup.\n\n"
+                    "Do you want to replace it?",
+                    parent=dialog
+                ):
+                    return
+
+            games_dest_base = None
+            if external_games:
+                games_dest_base_str = games_dest_var.get().strip()
+                if not games_dest_base_str:
+                    messagebox.showinfo("Info", "Please choose a destination folder for the game file(s).",
+                                         parent=dialog)
+                    return
+                games_dest_base = Path(games_dest_base_str)
+
+                conflicting_folders = [g["script_name"] for g in external_games
+                                        if (games_dest_base / g["script_name"]).exists()
+                                        and any((games_dest_base / g["script_name"]).iterdir())]
+                if conflicting_folders and not messagebox.askyesno(
+                    "Replace Existing Game Folder(s)?",
+                    "The following game folder(s) already exist at the chosen destination and are\n"
+                    "not empty. Their contents will be REPLACED/overwritten by this backup:\n\n"
+                    + "\n".join(f"  - {games_dest_base / s}" for s in conflicting_folders)
+                    + "\n\nDo you want to replace them?",
+                    parent=dialog
+                ):
+                    return
+
+            close_dialog(reacquire_parent_grab=False)
+
+            append_line, set_progress, win = open_task_log_window(
+                f"Restore - {prefix_code}",
+                modal_parent=(parent_dialog if parent_had_grab else None)
+            )
+            append_line(f"Starting restore from: {archive_path}")
+            append_line(f"Prefix destination: {target_prefix_path}")
+            if games_dest_base:
+                append_line(f"Game(s) destination base folder: {games_dest_base}")
+            if total_size:
+                append_line(f"Total size to extract: {human_size(total_size)}")
+            append_line("")
+
+            threading.Thread(target=run_restore_worker,
+                              args=(archive_path, manifest, runner_key, prefix_code,
+                                    target_prefix_path, games_dest_base, append_line,
+                                    set_progress, total_size),
+                              daemon=True).start()
+
+        ttk.Button(btn_row, text="Restore", style="Custom.TButton", width=12,
+                   command=do_restore).grid(row=0, column=0, padx=4)
+        ttk.Button(btn_row, text="Cancel", style="Custom.TButton", width=12,
+                   command=close_dialog).grid(row=0, column=1, padx=4)
+
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+        dialog.update_idletasks()
+        x = parent_win.winfo_rootx() + (parent_win.winfo_width() - dialog.winfo_width()) // 2
+        y = parent_win.winfo_rooty() + (parent_win.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+RUNNER_DISPLAY_NAMES = {"wine": "Wine", "protonge": "Proton GE", "protoncachyos": "Proton-CachyOS"}
+
+def remove_prefix_and_games_dialog(entry, parent_dialog=None):
+    """Hapus SEPENUHNYA sebuah prefix: folder prefix di disk + catatan registry-nya, beserta
+    SEMUA game/aplikasi launcher yang memakainya (script .sh, icon, entry runner_config.json).
+
+    PENTING: kalau file game itu ternyata berada DIDALAM folder prefix (mis. game GOG yang
+    terinstall ke drive_c prefix), file game tersebut IKUT TERHAPUS - karena memang jadi
+    bagian dari folder prefix yang dihapus. Game yang file-nya berada DILUAR prefix tidak
+    ikut kehapus filenya - hanya entry launcher-nya (script/config) saja yang dibersihkan,
+    persis seperti perilaku Remove biasa. Pengguna diberi tahu secara eksplisit mana yang
+    mana SEBELUM apapun benar-benar dihapus.
+
+    Return True kalau penghapusan berhasil dilakukan, False kalau dibatalkan/gagal."""
+    parent_win = parent_dialog if (parent_dialog is not None and parent_dialog.winfo_exists()) else root
+
+    prefix_path = Path(entry["prefix_path"])
+    games = entry.get("games") or []
+
+    try:
+        prefix_resolved = prefix_path.resolve()
+    except Exception:
+        prefix_resolved = prefix_path
+
+    inside_names, outside_names = [], []
+    for script_name in games:
+        script_path = bashlaunch_dir / f"{script_name}.sh"
+        folder_str = extract_folder_path_from_script(script_path)
+        is_inside = False
+        if folder_str:
+            try:
+                Path(folder_str).resolve().relative_to(prefix_resolved)
+                is_inside = True
+            except Exception:
+                is_inside = False
+        (inside_names if is_inside else outside_names).append(script_name)
+
+    lines = [f"Prefix: {entry['prefix_code']} ({RUNNER_DISPLAY_NAMES.get(entry['runner'], entry['runner'])})",
+             f"Location: {prefix_path}", ""]
+    if games:
+        lines.append("The following game(s)/app(s) using this prefix will be removed from the launcher:")
+        for name in games:
+            if name in inside_names:
+                tag = "  (installed inside this prefix - its files will also be DELETED)"
+            else:
+                tag = "  (files elsewhere are kept - only removed from the launcher)"
+            lines.append(f"  - {name}{tag}")
+        lines.append("")
+    else:
+        lines.append("No game/app is currently linked to this prefix.")
+        lines.append("")
+    lines.append("This will permanently delete the prefix folder from disk. This cannot be undone.\n\nContinue?")
+
+    if not messagebox.askyesno("Remove Prefix & Game(s)?", "\n".join(lines), parent=parent_win):
+        return False
+
+    if inside_names:
+        if not messagebox.askyesno(
+            "Confirm File Deletion",
+            "This will PERMANENTLY DELETE the installed files for:\n\n"
+            + "\n".join(f"  - {n}" for n in inside_names)
+            + "\n\n(they are installed inside this prefix's folder, including any save data kept "
+            "there). Are you absolutely sure?",
+            parent=parent_win
+        ):
+            return False
+
+    try:
+        if prefix_path.exists():
+            shutil.rmtree(prefix_path)
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to delete prefix folder:\n{str(e)}", parent=parent_win)
+        return False
+
+    # Bersihkan entry game-game yang memakai prefix ini dari launcher (script .sh, icon,
+    # runner_config.json). File game yang berada DILUAR prefix sengaja TIDAK disentuh -
+    # sama seperti perilaku Remove biasa (remove_script).
+    runner_cfg = load_runner_config()
+    for script_name in games:
+        script_path = bashlaunch_dir / f"{script_name}.sh"
+        icon_path = icon_dir / f"{script_name}.png"
+        script_path.unlink(missing_ok=True)
+        icon_path.unlink(missing_ok=True)
+        if script_name in runner_cfg:
+            del runner_cfg[script_name]
+    save_runner_config(runner_cfg)
+
+    # Hapus juga catatan prefix ini dari registry global supaya tidak muncul lagi di
+    # Prefix Configuration Manager maupun dideteksi keliru oleh find_owning_prefix.
+    reg = load_prefix_registry()
+    reg.pop(f"{entry['runner']}:{entry['prefix_code']}", None)
+    save_prefix_registry(reg)
+
+    status_label.config(text=f"Removed prefix '{entry['prefix_code']}' and {len(games)} game(s)/app(s).",
+                         fg=COLORS["warning"])
+    update_script_list()
+    return True
+
+def open_prefix_manager_dialog():
+    """Dialog utama untuk memanajemen konfigurasi per-prefix: menampilkan semua prefix Wine/
+    Proton GE/Proton-CachyOS yang sudah pernah dibuat (beserta nama game/aplikasi yang
+    memakainya), lalu memungkinkan membuka winecfg, Wine Explorer, uninstaller Windows, atau
+    Winetricks KHUSUS untuk prefix yang dipilih saja. Jendelanya bisa di-resize bebas, ada
+    scrollbar horizontal untuk kolom yang kepotong, dan tombol Maximize/Restore sendiri
+    (tidak semua window manager menampilkan tombol maximize bawaan untuk Toplevel Tk)."""
+    prefixes = list_all_known_prefixes()
+
+    dialog = tk.Toplevel(root)
+    dialog.title("Prefix Configuration Manager")
+    dialog.configure(bg=COLORS["primary"])
+    dialog.resizable(True, True)
+    dialog.minsize(640, 360)
+    dialog.transient(root)
+    dialog.grab_set()
+
+    frame = ttk.Frame(dialog, padding=15)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    top_bar = ttk.Frame(frame)
+    top_bar.pack(fill=tk.X, pady=(0, 8))
+
+    ttk.Label(top_bar, text="Select a prefix to configure (winecfg / explorer / uninstaller / winetricks):",
+              font=FONTS["normal"]).pack(side=tk.LEFT, anchor="w")
+
+    maximize_btn = ttk.Button(top_bar, text="🗖 Maximize", style="Custom.TButton", width=14)
+    maximize_btn.pack(side=tk.RIGHT)
+
+    refresh_btn = ttk.Button(top_bar, text="🔄 Refresh", style="Custom.TButton", width=12)
+    refresh_btn.pack(side=tk.RIGHT, padx=(0, 6))
+
+    def toggle_maximize():
+        # '-zoomed' adalah atribut khas X11/Linux untuk maximize window - dipakai duluan
+        # karena aplikasi ini memang untuk Linux (wine/proton). Kalau window manager-nya
+        # tidak mendukung atribut ini, jatuhkan ke cara manual: samakan ukuran & posisi
+        # dialog dengan ukuran layar penuh.
+        try:
+            is_zoomed = bool(dialog.attributes("-zoomed"))
+        except tk.TclError:
+            is_zoomed = False
+
+        if is_zoomed:
+            try:
+                dialog.attributes("-zoomed", False)
+            except tk.TclError:
+                pass
+            maximize_btn.config(text="🗖 Maximize")
+        else:
+            try:
+                dialog.attributes("-zoomed", True)
+            except tk.TclError:
+                dialog.geometry(f"{dialog.winfo_screenwidth()}x{dialog.winfo_screenheight()}+0+0")
+            maximize_btn.config(text="🗗 Restore")
+
+    maximize_btn.config(command=toggle_maximize)
+
+    list_frame = ttk.Frame(frame)
+    list_frame.pack(fill=tk.BOTH, expand=True)
+    list_frame.rowconfigure(0, weight=1)
+    list_frame.columnconfigure(0, weight=1)
+
+    vscroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+    vscroll.grid(row=0, column=1, sticky="ns")
+    hscroll = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL)
+    hscroll.grid(row=1, column=0, sticky="ew")
+
+    prefix_tree = ttk.Treeview(list_frame,
+                                columns=("Runner", "Prefix", "Games", "Proton", "Path"),
+                                show="headings",
+                                yscrollcommand=vscroll.set,
+                                xscrollcommand=hscroll.set,
+                                selectmode="browse",
+                                height=10)
+    prefix_tree.grid(row=0, column=0, sticky="nsew")
+    vscroll.config(command=prefix_tree.yview)
+    hscroll.config(command=prefix_tree.xview)
+
+    prefix_tree.heading("Runner", text="Runner", anchor="w")
+    prefix_tree.heading("Prefix", text="Prefix Code", anchor="w")
+    prefix_tree.heading("Games", text="Game(s)", anchor="w")
+    prefix_tree.heading("Proton", text="Proton Version", anchor="w")
+    prefix_tree.heading("Path", text="Location", anchor="w")
+    # stretch=False untuk semua kolom - lebar kolom TETAP walau jendela diperkecil,
+    # sehingga kalau tidak muat, scrollbar horizontal-lah yang dipakai untuk melihat
+    # sisanya (bukan tulisan yang otomatis terpotong/menyempit).
+    prefix_tree.column("Runner", width=100, anchor="w", stretch=False)
+    prefix_tree.column("Prefix", width=100, anchor="w", stretch=False)
+    prefix_tree.column("Games", width=220, anchor="w", stretch=False)
+    prefix_tree.column("Proton", width=170, anchor="w", stretch=False)
+    prefix_tree.column("Path", width=320, anchor="w", stretch=False)
+
+    empty_label = ttk.Label(frame,
+                             text="No prefixes found yet. A prefix is created the first time\n"
+                                  "you PLAY or run APPS SETUP for a game via Wine/Proton.",
+                             font=FONTS["small"], justify=tk.LEFT)
+
+    def refresh_prefix_list():
+        """Muat ulang daftar prefix dari disk (runner_config.json + prefix_registry.json)
+        dan isi ulang treeview - dipakai tombol Refresh, dan juga saat dialog ini pertama
+        dibuka. Berguna kalau ada prefix baru dibuat (mis. lewat PLAY di jendela utama)
+        SELAGI dialog Prefix Configuration Manager ini masih terbuka."""
+        selected_iid = prefix_tree.selection()[0] if prefix_tree.selection() else None
+        prefix_tree.delete(*prefix_tree.get_children())
+        prefixes[:] = list_all_known_prefixes()
+        for entry in prefixes:
+            games_display = ", ".join(entry.get("games") or []) or "-"
+            prefix_tree.insert("", tk.END, iid=f"{entry['runner']}:{entry['prefix_code']}",
+                                values=(RUNNER_DISPLAY_NAMES.get(entry["runner"], entry["runner"]),
+                                        entry["prefix_code"],
+                                        games_display,
+                                        entry.get("proton_name") or "-",
+                                        entry["prefix_path"]))
+        if prefixes:
+            empty_label.pack_forget()
+        else:
+            empty_label.pack(anchor="w", pady=(8, 0))
+        # Pertahankan seleksi lama kalau prefix itu masih ada setelah refresh, supaya
+        # tombol Winecfg/Explorer/dst tidak perlu diklik ulang tanpa alasan.
+        if selected_iid is not None and prefix_tree.exists(selected_iid):
+            prefix_tree.selection_set(selected_iid)
+
+    refresh_prefix_list()
+    refresh_btn.config(command=refresh_prefix_list)
+
+    def get_selected_entry():
+        sel = prefix_tree.selection()
+        if not sel:
+            messagebox.showinfo("Info", "Select a prefix from the list first.")
+            return None
+        runner_key, prefix_code = sel[0].split(":", 1)
+        for entry in prefixes:
+            if entry["runner"] == runner_key and entry["prefix_code"] == prefix_code:
+                return entry
+        return None
+
+    btn_row = ttk.Frame(frame)
+    btn_row.pack(pady=(10, 0))
+
+    def do_winecfg():
+        entry = get_selected_entry()
+        if entry:
+            run_prefix_tool(entry, "winecfg", parent=dialog)
+
+    def do_explorer():
+        entry = get_selected_entry()
+        if entry:
+            run_prefix_tool(entry, "explorer", parent=dialog)
+
+    def do_uninstaller():
+        entry = get_selected_entry()
+        if entry:
+            run_prefix_tool(entry, "uninstaller", parent=dialog)
+
+    def do_winetricks():
+        entry = get_selected_entry()
+        if not entry:
+            return
+        open_winetricks_dialog(entry, parent_dialog=dialog)
+
+    ttk.Button(btn_row, text="Winecfg", style="Custom.TButton", width=12,
+               command=do_winecfg).grid(row=0, column=0, padx=3)
+    ttk.Button(btn_row, text="Explorer", style="Custom.TButton", width=12,
+               command=do_explorer).grid(row=0, column=1, padx=3)
+    ttk.Button(btn_row, text="Uninstaller", style="Custom.TButton", width=12,
+               command=do_uninstaller).grid(row=0, column=2, padx=3)
+    ttk.Button(btn_row, text="Winetricks...", style="Custom.TButton", width=12,
+               command=do_winetricks).grid(row=0, column=3, padx=3)
+
+    def do_open_folder():
+        entry = get_selected_entry()
+        if not entry:
+            return
+        p = Path(entry["prefix_path"])
+        if p.is_dir():
+            subprocess.Popen(["xdg-open", str(p)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              env=get_clean_subprocess_env())
+        else:
+            messagebox.showerror("Error", f"Folder not found:\n{p}", parent=dialog)
+
+    ttk.Button(btn_row, text="Open Folder", style="Custom.TButton", width=12,
+               command=do_open_folder).grid(row=0, column=4, padx=3)
+
+    def do_backup():
+        entry = get_selected_entry()
+        if entry:
+            open_backup_prefix_dialog(entry, parent_dialog=dialog)
+
+    def do_restore():
+        open_restore_backup_dialog(parent_dialog=dialog)
+
+    btn_row2 = ttk.Frame(frame)
+    btn_row2.pack(pady=(8, 0))
+    ttk.Button(btn_row2, text="Backup Prefix + Game...", style="Custom.TButton", width=22,
+               command=do_backup).grid(row=0, column=0, padx=3)
+    ttk.Button(btn_row2, text="Restore Backup...", style="Custom.TButton", width=18,
+               command=do_restore).grid(row=0, column=1, padx=3)
+
+    def do_remove_prefix():
+        entry = get_selected_entry()
+        if not entry:
+            return
+        if remove_prefix_and_games_dialog(entry, parent_dialog=dialog):
+            iid = f"{entry['runner']}:{entry['prefix_code']}"
+            if prefix_tree.exists(iid):
+                prefix_tree.delete(iid)
+            # Perbarui daftar lokal supaya get_selected_entry() berikutnya tetap konsisten
+            # tanpa perlu menutup & membuka ulang dialog ini.
+            prefixes[:] = [e for e in prefixes
+                           if not (e["runner"] == entry["runner"] and e["prefix_code"] == entry["prefix_code"])]
+
+    btn_row3 = ttk.Frame(frame)
+    btn_row3.pack(pady=(8, 0))
+    ttk.Button(btn_row3, text="🗑 Remove Prefix + Game(s)...", style="Custom.TButton", width=26,
+               command=do_remove_prefix).grid(row=0, column=0, padx=3)
+
+    close_row = ttk.Frame(frame)
+    close_row.pack(pady=(10, 0))
+    ttk.Button(close_row, text="Close", command=dialog.destroy, style="Custom.TButton", width=12).pack()
+
+    # Ukuran awal dibuat cukup lega untuk menampung kolom Game(s) yang baru, tapi jendela
+    # tetap bisa di-resize/maximize bebas oleh pengguna (lihat resizable(True, True) diatas).
+    init_width, init_height = 1000, 520
+    dialog.update_idletasks()
+    x = root.winfo_rootx() + (root.winfo_width() - init_width) // 2
+    y = root.winfo_rooty() + (root.winfo_height() - init_height) // 2
+    dialog.geometry(f"{init_width}x{init_height}+{max(x, 0)}+{max(y, 0)}")
 
 def browse_folder_with_create_option(title, initialdir):
     """Buka dialog pilih folder (native OS), lalu tawarkan membuat SATU folder baru
@@ -779,13 +2480,20 @@ def save_runner_config(cfg):
         print(f"Error saving runner config: {e}")
 
 def extract_exe_path_from_script(script_path):
-    """Ambil path .exe dari script yang sudah ada (baris wine atau proton run)."""
+    """Ambil path .exe dari script yang sudah ada (baris wine atau proton run).
+
+    Catatan: pola proton SENGAJA tidak mensyaratkan kata "proton" ada didalam tanda kutip
+    sebelum "run" - script hasil Restore Backup menulis proton_path kosong ("") dengan
+    sengaja (lihat run_restore_worker), jadi baris runnya jadi '"" run "exe.exe"'. Kalau
+    regex ini mensyaratkan kata "proton" didalam kutip itu, exe_path tidak akan pernah
+    terbaca sama sekali untuk game hasil restore sebelum Proton build dipilih ulang -
+    membuat PLAY pertama kali gagal duluan dengan "Could not read exe/folder path"."""
     try:
         with open(script_path, 'r') as f:
             content = f.read()
         match = re.search(r'wine\s+"([^"]+)"', content)
         if not match:
-            match = re.search(r'"\s*[^"]*proton[^"]*"\s+run\s+"([^"]+)"', content, re.IGNORECASE)
+            match = re.search(r'"[^"]*"\s+run\s+"([^"]+)"', content)
         if match:
             return match.group(1)
     except Exception:
@@ -978,18 +2686,22 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
 
         def do_move():
             def on_moved(new_path):
+                old_path = state["existing_path"]
                 state["existing_path"] = new_path
-                # Operasi pindah sudah benar-benar terjadi di disk, jadi langsung simpan
-                # perubahannya ke runner_config.json meski dialog ini nanti dibatalkan.
-                if parent_script_name:
-                    cfg_all = load_runner_config()
-                    if parent_script_name in cfg_all and cfg_all[parent_script_name].get("runner") == runner_key:
-                        cfg_all[parent_script_name]["prefix_path"] = str(new_path)
-                        save_runner_config(cfg_all)
+                # Perbaiki metadata DAN isi script .sh untuk SEMUA game yang memakai prefix
+                # ini (bukan cuma game yang sedang dibuka di dialog ini) - lihat docstring
+                # relink_scripts_after_prefix_move untuk kenapa ini penting (game yang
+                # file-nya ada didalam prefix ikut pindah secara fisik, jadi scriptnya harus
+                # menunjuk ke alamat baru juga, atau game itu tidak akan bisa di-launch).
+                updated = relink_scripts_after_prefix_move(runner_key, state["existing_code"], old_path, new_path)
                 # Perbarui juga registry global supaya deteksi otomatis (find_owning_prefix)
                 # untuk game lain yang mungkin memakai prefix yang sama tetap akurat.
                 update_registry_prefix_path(runner_key, state["existing_code"], new_path)
                 refresh()
+                if updated:
+                    status_label.config(
+                        text=f"Prefix moved - relinked {len(updated)} game(s): {', '.join(updated)}",
+                        fg=COLORS["success"])
             move_prefix_folder_dialog(state["existing_path"], state["existing_code"], runner_key, on_moved)
 
         def do_browse():
@@ -1708,78 +3420,111 @@ def add_script():
         title="Select Windows Executable (.exe)",
         filetypes=[("Executable Files", "*.exe"), ("All Files", "*.*")]
     )
-    
-    if exe_path:
-        exe_path_obj = Path(exe_path)
-        exe_name = exe_path_obj.stem
-        
+
+    if not exe_path:
+        return
+
+    exe_path_obj = Path(exe_path)
+    exe_name = exe_path_obj.stem
+    suggested_name = exe_name
+
+    # Loop supaya kalau nama yang dipilih ternyata bentrok dengan game yang sudah ada,
+    # pengguna bisa langsung diberi pilihan: Replace (timpa), pakai nama lain (Rename), atau
+    # batalkan sepenuhnya - bukan langsung menimpa diam-diam atau gagal tanpa penjelasan.
+    while True:
         new_name = simpledialog.askstring(
             "Rename Script",
             "Enter script name (for display):",
-            initialvalue=exe_name
+            initialvalue=suggested_name
         )
-        
-        if new_name:
-            # Sanitize filename, only allow alphanumeric, space, underscore, and hyphen
-            safe_new_name = "".join(c for c in new_name if c.isalnum() or c in (' ', '_', '-')).strip()
-            
-            if not safe_new_name:
-                messagebox.showerror("Error", "Invalid script name.")
-                return
 
-            script_path = bashlaunch_dir / f"{safe_new_name}.sh"
-            folder_path = exe_path_obj.parent
-            exe_resolved = exe_path_obj.resolve()
-            folder_resolved = folder_path.resolve()
+        if not new_name:
+            return  # dibatalkan oleh pengguna
 
-            # Note the use of Path.resolve() to ensure absolute paths
-            # and correct handling of spaces when writing to the bash script
-            script_content = (
-                "#!/bin/bash\n"
-                f"cd \"{folder_resolved}\"\n"
-                f"wine \"{exe_resolved}\"\n"
+        # Sanitize filename, only allow alphanumeric, space, underscore, and hyphen
+        safe_new_name = "".join(c for c in new_name if c.isalnum() or c in (' ', '_', '-')).strip()
+
+        if not safe_new_name:
+            messagebox.showerror("Error", "Invalid script name.")
+            return
+
+        script_path = bashlaunch_dir / f"{safe_new_name}.sh"
+        if script_path.exists():
+            choice = messagebox.askyesnocancel(
+                "Name Already Exists",
+                f"A game named '{safe_new_name}' already exists.\n\n"
+                "Yes = Replace it (its old launch script & runner settings will be overwritten)\n"
+                "No = Enter a different name instead\n"
+                "Cancel = Don't add this game"
             )
+            if choice is None:
+                return  # Cancel - batalkan sepenuhnya
+            if choice is False:
+                suggested_name = safe_new_name
+                continue  # No - kembali ke dialog nama, biarkan pengguna ketik nama baru
+            # choice is True (Yes) - lanjut, replace game yang sudah ada
+        break
 
-            try:
-                with open(script_path, "w") as script_file:
-                    script_file.write(script_content)
-                
-                # Set permission
-                script_path.chmod(0o755)
+    folder_path = exe_path_obj.parent
+    exe_resolved = exe_path_obj.resolve()
+    folder_resolved = folder_path.resolve()
 
-                # Jika exe yang baru ditambahkan ternyata sudah berada didalam sebuah prefix
-                # yang sudah ada (misalnya baru saja selesai diinstall lewat APPS SETUP), kaitkan
-                # langsung game ini ke prefix yang sama - JANGAN biarkan PLAY pertama membuat
-                # prefix baru yang kosong. Ini krusial untuk game (mis. GOG) yang lisensi /
-                # aktivasinya terikat ke prefix tempat ia pertama kali diinstall.
-                owning = find_owning_prefix(exe_resolved)
-                status_extra = ""
-                if owning and (owning["runner"] == "wine" or owning.get("proton_path")):
-                    cfg_entry = {
-                        "runner": owning["runner"],
-                        "prefix_code": owning["prefix_code"],
-                        "prefix_path": owning["prefix_path"],
-                        "launch_options": "",
-                        "comment": ""
-                    }
-                    if owning["runner"] in ("protonge", "protoncachyos"):
-                        cfg_entry["proton_name"] = owning.get("proton_name") or ""
-                        cfg_entry["proton_path"] = owning["proton_path"]
+    # Note the use of Path.resolve() to ensure absolute paths
+    # and correct handling of spaces when writing to the bash script
+    script_content = (
+        "#!/bin/bash\n"
+        f"cd \"{folder_resolved}\"\n"
+        f"wine \"{exe_resolved}\"\n"
+    )
 
-                    new_script_content = build_script_content(str(folder_resolved), str(exe_resolved), cfg_entry)
-                    with open(script_path, "w") as script_file:
-                        script_file.write(new_script_content)
-                    script_path.chmod(0o755)
+    try:
+        with open(script_path, "w") as script_file:
+            script_file.write(script_content)
 
-                    runner_cfg = load_runner_config()
-                    runner_cfg[safe_new_name] = cfg_entry
-                    save_runner_config(runner_cfg)
-                    status_extra = f" (linked to existing prefix {owning['prefix_code']})"
+        # Set permission
+        script_path.chmod(0o755)
 
-                update_script_list()
-                status_label.config(text=f"Added: {safe_new_name}{status_extra}", fg=COLORS["success"])
-            except Exception as e:
-                status_label.config(text=f"Error creating script: {str(e)}", fg=COLORS["danger"])
+        # Jika exe yang baru ditambahkan ternyata sudah berada didalam sebuah prefix
+        # yang sudah ada (misalnya baru saja selesai diinstall lewat APPS SETUP), kaitkan
+        # langsung game ini ke prefix yang sama - JANGAN biarkan PLAY pertama membuat
+        # prefix baru yang kosong. Ini krusial untuk game (mis. GOG) yang lisensi /
+        # aktivasinya terikat ke prefix tempat ia pertama kali diinstall.
+        owning = find_owning_prefix(exe_resolved)
+        status_extra = ""
+        if owning and (owning["runner"] == "wine" or owning.get("proton_path")):
+            cfg_entry = {
+                "runner": owning["runner"],
+                "prefix_code": owning["prefix_code"],
+                "prefix_path": owning["prefix_path"],
+                "launch_options": "",
+                "comment": ""
+            }
+            if owning["runner"] in ("protonge", "protoncachyos"):
+                cfg_entry["proton_name"] = owning.get("proton_name") or ""
+                cfg_entry["proton_path"] = owning["proton_path"]
+
+            new_script_content = build_script_content(str(folder_resolved), str(exe_resolved), cfg_entry)
+            with open(script_path, "w") as script_file:
+                script_file.write(new_script_content)
+            script_path.chmod(0o755)
+
+            runner_cfg = load_runner_config()
+            runner_cfg[safe_new_name] = cfg_entry
+            save_runner_config(runner_cfg)
+            status_extra = f" (linked to existing prefix {owning['prefix_code']})"
+        else:
+            # Tidak/tidak lagi terkait prefix manapun (mis. dulu ada di runner_config tapi
+            # sekarang di-Replace dengan exe yang berdiri sendiri) - bersihkan entry lama
+            # supaya tidak ada info runner/prefix yang basi tertinggal untuk nama ini.
+            runner_cfg = load_runner_config()
+            if safe_new_name in runner_cfg:
+                del runner_cfg[safe_new_name]
+                save_runner_config(runner_cfg)
+
+        update_script_list()
+        status_label.config(text=f"Added: {safe_new_name}{status_extra}", fg=COLORS["success"])
+    except Exception as e:
+        status_label.config(text=f"Error creating script: {str(e)}", fg=COLORS["danger"])
 
 def remove_script():
     """Remove the selected script"""
@@ -2203,6 +3948,9 @@ all_buttons.append(settings_btn)
 settings_btn.pack(side=tk.RIGHT)
 
 settings_menu = tk.Menu(root, tearoff=0)
+settings_menu.add_command(label="Prefix Configuration Manager...",
+                          command=open_prefix_manager_dialog)
+settings_menu.add_separator()
 settings_menu.add_command(label="Wine Configuration (winecfg)", 
                           command=open_winecfg)
 settings_menu.add_command(label="Open Wine Prefix Folder", 
