@@ -15,6 +15,9 @@ from PIL import Image, ImageTk, ImageDraw
 import json
 import tarfile
 import tempfile
+import urllib.request
+import urllib.error
+import webbrowser
 from datetime import datetime
 import time
 
@@ -326,6 +329,44 @@ def find_steam_install_path():
     fallback.mkdir(exist_ok=True)
     return fallback
 
+def extract_archive_to_dir(archive_path, target_dir):
+    """Ekstrak SATU arsip Proton (.tar.gz/.tar.xz/.tgz/.zip) ke target_dir, membungkus hasil
+    ekstrak dalam satu folder kalau arsipnya sendiri tidak punya satu folder induk. Logika
+    inti ini dipakai bersama oleh extract_proton_archive() (pilih arsip lewat file dialog)
+    dan download_and_install_protonge_worker() (arsip hasil download online) - aman dipanggil
+    dari background thread karena tidak menyentuh widget Tk apapun."""
+    archive_path_obj = Path(archive_path)
+    target_dir.mkdir(exist_ok=True)
+    before_entries = {p.name for p in target_dir.iterdir() if p.is_dir()}
+
+    if archive_path_obj.suffix.lower() == ".zip":
+        import zipfile
+        with zipfile.ZipFile(archive_path, 'r') as zf:
+            top_level_names = {Path(n).parts[0] for n in zf.namelist() if n.strip()}
+            zf.extractall(target_dir)
+    else:
+        with tarfile.open(archive_path, 'r:*') as tf:
+            top_level_names = {Path(n).parts[0] for n in tf.getnames() if n.strip()}
+            try:
+                tf.extractall(target_dir, filter='data')
+            except TypeError:
+                # Python versi lama belum mendukung parameter 'filter'
+                tf.extractall(target_dir)
+
+    new_top_names = top_level_names - before_entries
+
+    # Jika arsip tidak memiliki satu folder induk (file berserakan di root arsip),
+    # bungkus hasil ekstrak ke dalam satu folder bernama sesuai arsipnya.
+    if len(new_top_names) != 1:
+        wrapper_name = archive_path_obj.name.replace(".tar.gz", "").replace(".tar.xz", "") \
+                                             .replace(".tgz", "").replace(".zip", "")
+        wrapper_dir = target_dir / wrapper_name
+        wrapper_dir.mkdir(exist_ok=True)
+        for name in new_top_names:
+            src = target_dir / name
+            if src.exists() and src != wrapper_dir:
+                src.rename(wrapper_dir / name)
+
 def extract_proton_archive(target_dir, build_label):
     """Pilih arsip Proton (.tar.gz/.tar.xz/.tgz/.zip) lalu ekstrak ke target_dir.
     Dipakai bersama oleh Proton GE dan Proton-CachyOS."""
@@ -377,37 +418,7 @@ def extract_proton_archive(target_dir, build_label):
 
     def do_extract():
         try:
-            target_dir.mkdir(exist_ok=True)
-            before_entries = {p.name for p in target_dir.iterdir() if p.is_dir()}
-
-            if archive_path_obj.suffix.lower() == ".zip":
-                import zipfile
-                with zipfile.ZipFile(archive_path, 'r') as zf:
-                    top_level_names = {Path(n).parts[0] for n in zf.namelist() if n.strip()}
-                    zf.extractall(target_dir)
-            else:
-                import tarfile
-                with tarfile.open(archive_path, 'r:*') as tf:
-                    top_level_names = {Path(n).parts[0] for n in tf.getnames() if n.strip()}
-                    try:
-                        tf.extractall(target_dir, filter='data')
-                    except TypeError:
-                        # Python versi lama belum mendukung parameter 'filter'
-                        tf.extractall(target_dir)
-
-            new_top_names = top_level_names - before_entries
-
-            # Jika arsip tidak memiliki satu folder induk (file berserakan di root arsip),
-            # bungkus hasil ekstrak ke dalam satu folder bernama sesuai arsipnya.
-            if len(new_top_names) != 1:
-                wrapper_name = archive_path_obj.name.replace(".tar.gz", "").replace(".tar.xz", "") \
-                                                     .replace(".tgz", "").replace(".zip", "")
-                wrapper_dir = target_dir / wrapper_name
-                wrapper_dir.mkdir(exist_ok=True)
-                for name in new_top_names:
-                    src = target_dir / name
-                    if src.exists() and src != wrapper_dir:
-                        src.rename(wrapper_dir / name)
+            extract_archive_to_dir(archive_path, target_dir)
         except Exception as e:
             extract_result["error"] = e
 
@@ -456,6 +467,519 @@ def open_protonge_folder():
 def open_protoncachyos_folder():
     """Buka folder tempat Proton-CachyOS diekstrak (~/wlm/protoncachyos)."""
     open_proton_folder(protoncachyos_dir, "Proton-CachyOS")
+
+PROTONGE_RELEASES_API = "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases"
+PROTONGE_RELEASES_PAGE = "https://github.com/GloriousEggroll/proton-ge-custom/releases"
+
+def fetch_protonge_releases(limit=100):
+    """Ambil daftar rilis ProtonGE terbaru langsung dari GitHub (GloriousEggroll/proton-ge-custom).
+    Dipanggil dari background thread karena ini network call yang blocking. Return list of dict:
+    {"tag", "name", "published_at", "asset_name", "download_url", "size"} - hanya rilis yang
+    punya satu asset .tar.gz utama (bukan file checksum .sha512sum). Melempar exception kalau
+    gagal (tidak ada internet, GitHub rate-limit, dll) supaya bisa ditangani oleh pemanggilnya."""
+    url = f"{PROTONGE_RELEASES_API}?per_page={limit}"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "wine-launcher-manager",
+        "Accept": "application/vnd.github+json",
+    })
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    releases = []
+    for rel in data:
+        asset = None
+        for a in rel.get("assets", []):
+            name = a.get("name", "")
+            if name.lower().endswith(".tar.gz"):
+                asset = a
+                break
+        if not asset:
+            continue
+        releases.append({
+            "tag": rel.get("tag_name", ""),
+            "name": rel.get("name") or rel.get("tag_name", ""),
+            "published_at": (rel.get("published_at") or "")[:10],
+            "asset_name": asset.get("name", ""),
+            "download_url": asset.get("browser_download_url", ""),
+            "size": asset.get("size", 0),
+        })
+    return releases
+
+def download_and_install_protonge_worker(release, append_line, set_progress=None):
+    """Berjalan di background thread: download asset .tar.gz milik satu rilis ProtonGE dari
+    GitHub (dengan progress live via append_line + set_progress kalau ukurannya diketahui),
+    lalu ekstrak ke ~/wlm/protonge/ lewat extract_archive_to_dir (fungsi yang sama dipakai
+    oleh 'Extract Proton GE Archive...' manual)."""
+    tmp_path = None
+    try:
+        url = release["download_url"]
+        total_size = release.get("size") or 0
+        append_line(f"Downloading {release['asset_name']} ({human_size(total_size)})...")
+
+        tmp_fd, tmp_name = tempfile.mkstemp(prefix="wlm_protonge_", suffix=".tar.gz")
+        tmp_path = Path(tmp_name)
+
+        req = urllib.request.Request(url, headers={"User-Agent": "wine-launcher-manager"})
+        downloaded = 0
+        last_report = 0.0
+        with urllib.request.urlopen(req, timeout=30) as resp, os.fdopen(tmp_fd, "wb") as out_file:
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+                downloaded += len(chunk)
+                now = time.time()
+                if now - last_report > 0.2:
+                    if total_size:
+                        pct = downloaded * 100 / total_size
+                        append_line(f"  {human_size(downloaded)} / {human_size(total_size)} ({pct:.0f}%)")
+                        if set_progress:
+                            set_progress(pct)
+                    else:
+                        append_line(f"  {human_size(downloaded)} downloaded...")
+                    last_report = now
+
+        if set_progress and total_size:
+            set_progress(100)
+
+        append_line("")
+        append_line(f"Download complete ({human_size(downloaded)}). Extracting to {protonge_dir}...")
+        extract_archive_to_dir(tmp_path, protonge_dir)
+
+        append_line("")
+        append_line(f"ProtonGE {release['tag']} installed successfully.")
+        root.after(0, lambda: status_label.config(
+            text=f"ProtonGE {release['tag']} installed successfully.", fg=COLORS["success"]))
+    except Exception as e:
+        err = str(e)
+        append_line("")
+        append_line(f"ERROR: {err}")
+        root.after(0, lambda: messagebox.showerror("Download Failed", f"Failed to download/install ProtonGE:\n{err}",
+                                                     parent=root))
+        root.after(0, lambda: status_label.config(text=f"ProtonGE download failed: {err}", fg=COLORS["danger"]))
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+def open_protonge_download_dialog():
+    """Jendela untuk melihat daftar rilis ProtonGE terbaru langsung dari GitHub dan
+    mendownload + memasangnya secara otomatis, tanpa perlu download manual dari browser lalu
+    'Extract Proton GE Archive...' sendiri. Gaya jendelanya konsisten dengan Prefix
+    Configuration Manager (Treeview list + tombol aksi di bawahnya)."""
+    dialog = tk.Toplevel(root)
+    dialog.title("Download ProtonGE")
+    dialog.configure(bg=COLORS["primary"])
+    dialog.resizable(True, True)
+    dialog.minsize(640, 480)
+    dialog.transient(root)
+    dialog.grab_set()
+
+    frame = ttk.Frame(dialog, padding=15)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    top_bar = ttk.Frame(frame)
+    top_bar.pack(fill=tk.X, pady=(0, 8))
+    ttk.Label(top_bar, text="Latest ProtonGE releases (GloriousEggroll/proton-ge-custom):",
+              font=FONTS["normal"]).pack(side=tk.LEFT, anchor="w")
+
+    refresh_btn = ttk.Button(top_bar, text="Refresh", style="Custom.TButton", width=12)
+    refresh_btn.pack(side=tk.RIGHT)
+
+    status_line = ttk.Label(frame, text="Loading releases from GitHub...", font=FONTS["small"])
+    status_line.pack(anchor="w", pady=(0, 6))
+
+    list_frame = ttk.Frame(frame)
+    list_frame.pack(fill=tk.BOTH, expand=True)
+    list_frame.rowconfigure(0, weight=1)
+    list_frame.columnconfigure(0, weight=1)
+
+    vscroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+    vscroll.grid(row=0, column=1, sticky="ns")
+
+    release_tree = ttk.Treeview(list_frame,
+                                 columns=("Version", "Published", "Size", "Status"),
+                                 show="headings",
+                                 yscrollcommand=vscroll.set,
+                                 selectmode="browse",
+                                 height=10)
+    release_tree.grid(row=0, column=0, sticky="nsew")
+    vscroll.config(command=release_tree.yview)
+
+    release_tree.heading("Version", text="Version", anchor="w")
+    release_tree.heading("Published", text="Published", anchor="w")
+    release_tree.heading("Size", text="Size", anchor="w")
+    release_tree.heading("Status", text="Status", anchor="w")
+    release_tree.column("Version", width=220, anchor="w", stretch=False)
+    release_tree.column("Published", width=110, anchor="w", stretch=False)
+    release_tree.column("Size", width=90, anchor="w", stretch=False)
+    release_tree.column("Status", width=100, anchor="w", stretch=False)
+
+    releases_data = {}
+
+    def populate(releases):
+        release_tree.delete(*release_tree.get_children())
+        releases_data.clear()
+        installed_names = {name for name, _ in find_protonge_installations()}
+        for rel in releases:
+            iid = rel["tag"]
+            releases_data[iid] = rel
+            asset_folder_name = rel["asset_name"][:-len(".tar.gz")] if rel["asset_name"].lower().endswith(".tar.gz") else rel["asset_name"]
+            is_installed = rel["tag"] in installed_names or asset_folder_name in installed_names
+            release_tree.insert("", tk.END, iid=iid,
+                                 values=(rel["name"], rel["published_at"], human_size(rel["size"]),
+                                         "Installed" if is_installed else ""))
+
+    def load_releases():
+        status_line.config(text="Loading releases from GitHub...")
+        refresh_btn.config(state="disabled")
+
+        def worker():
+            try:
+                releases = fetch_protonge_releases()
+                error = None
+            except Exception as e:
+                releases = []
+                error = str(e)
+
+            def finish():
+                refresh_btn.config(state="normal")
+                if error:
+                    status_line.config(text=f"Failed to load releases: {error}")
+                    messagebox.showerror(
+                        "Error",
+                        f"Failed to fetch ProtonGE release list from GitHub:\n{error}\n\n"
+                        "Check your internet connection and try Refresh again.",
+                        parent=dialog
+                    )
+                else:
+                    status_line.config(text=f"{len(releases)} release(s) loaded.")
+                    populate(releases)
+
+            root.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    refresh_btn.config(command=load_releases)
+    load_releases()
+
+    btn_row = ttk.Frame(frame)
+    btn_row.pack(pady=(10, 0))
+
+    def get_selected_release():
+        sel = release_tree.selection()
+        if not sel:
+            messagebox.showinfo("Info", "Select a release from the list first.", parent=dialog)
+            return None
+        return releases_data.get(sel[0])
+
+    def do_download():
+        rel = get_selected_release()
+        if not rel:
+            return
+        if not messagebox.askyesno(
+            "Download & Install ProtonGE",
+            f"Download and install ProtonGE {rel['tag']}?\n\n"
+            f"File: {rel['asset_name']}\n"
+            f"Size: {human_size(rel['size'])}\n\n"
+            f"It will be extracted into:\n{protonge_dir}",
+            parent=dialog
+        ):
+            return
+
+        append_line, set_progress, win = open_task_log_window(f"Download ProtonGE - {rel['tag']}", modal_parent=dialog)
+        append_line(f"Release: {rel['name']} ({rel['tag']})")
+        append_line("")
+        threading.Thread(target=download_and_install_protonge_worker, args=(rel, append_line, set_progress),
+                          daemon=True).start()
+
+    def do_open_page():
+        webbrowser.open(PROTONGE_RELEASES_PAGE)
+
+    ttk.Button(btn_row, text="Download & Install", style="Custom.TButton", width=18,
+               command=do_download).grid(row=0, column=0, padx=3)
+    ttk.Button(btn_row, text="Open Releases Page", style="Custom.TButton", width=18,
+               command=do_open_page).grid(row=0, column=1, padx=3)
+
+    dialog.update_idletasks()
+    x = root.winfo_rootx() + (root.winfo_width() - 720) // 2
+    y = root.winfo_rooty() + (root.winfo_height() - 560) // 2
+    dialog.geometry(f"720x560+{max(x, 0)}+{max(y, 0)}")
+
+# =======================================================================
+# Proton-CachyOS - Download Online (sama pola dengan Download ProtonGE Online)
+# =======================================================================
+PROTONCACHYOS_RELEASES_API = "https://api.github.com/repos/CachyOS/proton-cachyos/releases"
+PROTONCACHYOS_RELEASES_PAGE = "https://github.com/CachyOS/proton-cachyos/releases"
+ARCHIVE_SUFFIXES = (".tar.gz", ".tar.xz", ".tgz", ".zip")
+
+def _strip_archive_suffix(name):
+    """Buang ekstensi arsip (.tar.gz/.tar.xz/.tgz/.zip) dari sebuah nama file/asset."""
+    for suf in ARCHIVE_SUFFIXES:
+        if name.lower().endswith(suf):
+            return name[:-len(suf)]
+    return name
+
+def fetch_protoncachyos_releases(limit=20):
+    """Ambil daftar rilis Proton-CachyOS terbaru langsung dari GitHub (CachyOS/proton-cachyos).
+    Berbeda dengan ProtonGE yang biasanya satu asset .tar.gz per rilis, satu rilis
+    Proton-CachyOS sering punya beberapa varian build sekaligus (mis. SLR & Native), jadi
+    setiap asset arsip yang valid ditampilkan sebagai baris tersendiri (bukan cuma satu asset
+    per rilis). Dipanggil dari background thread karena ini network call yang blocking.
+    Return list of dict: {"tag", "release_name", "published_at", "asset_name",
+    "download_url", "size"}. Melempar exception kalau gagal (tidak ada internet, GitHub
+    rate-limit, dll) supaya bisa ditangani oleh pemanggilnya."""
+    url = f"{PROTONCACHYOS_RELEASES_API}?per_page={limit}"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "wine-launcher-manager",
+        "Accept": "application/vnd.github+json",
+    })
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    releases = []
+    for rel in data:
+        tag = rel.get("tag_name", "")
+        published = (rel.get("published_at") or "")[:10]
+        release_name = rel.get("name") or tag
+        for a in rel.get("assets", []):
+            name = a.get("name", "")
+            if not name.lower().endswith(ARCHIVE_SUFFIXES):
+                continue
+            releases.append({
+                "tag": tag,
+                "release_name": release_name,
+                "published_at": published,
+                "asset_name": name,
+                "download_url": a.get("browser_download_url", ""),
+                "size": a.get("size", 0),
+            })
+    return releases
+
+def download_and_install_protoncachyos_worker(release, append_line, set_progress=None):
+    """Berjalan di background thread: download asset arsip milik satu build Proton-CachyOS
+    dari GitHub (dengan progress live via append_line + set_progress kalau ukurannya
+    diketahui), lalu ekstrak ke ~/wlm/protoncachyos/ lewat extract_archive_to_dir (fungsi
+    yang sama dipakai oleh 'Extract Proton-CachyOS Archive...' manual)."""
+    tmp_path = None
+    try:
+        url = release["download_url"]
+        total_size = release.get("size") or 0
+        asset_name = release["asset_name"]
+        append_line(f"Downloading {asset_name} ({human_size(total_size)})...")
+
+        suffix = next((s for s in ARCHIVE_SUFFIXES if asset_name.lower().endswith(s)),
+                       Path(asset_name).suffix)
+        tmp_fd, tmp_name = tempfile.mkstemp(prefix="wlm_protoncachyos_", suffix=suffix)
+        tmp_path = Path(tmp_name)
+
+        req = urllib.request.Request(url, headers={"User-Agent": "wine-launcher-manager"})
+        downloaded = 0
+        last_report = 0.0
+        with urllib.request.urlopen(req, timeout=30) as resp, os.fdopen(tmp_fd, "wb") as out_file:
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+                downloaded += len(chunk)
+                now = time.time()
+                if now - last_report > 0.2:
+                    if total_size:
+                        pct = downloaded * 100 / total_size
+                        append_line(f"  {human_size(downloaded)} / {human_size(total_size)} ({pct:.0f}%)")
+                        if set_progress:
+                            set_progress(pct)
+                    else:
+                        append_line(f"  {human_size(downloaded)} downloaded...")
+                    last_report = now
+
+        if set_progress and total_size:
+            set_progress(100)
+
+        append_line("")
+        append_line(f"Download complete ({human_size(downloaded)}). Extracting to {protoncachyos_dir}...")
+        extract_archive_to_dir(tmp_path, protoncachyos_dir)
+
+        append_line("")
+        append_line(f"Proton-CachyOS {release['release_name']} installed successfully.")
+        root.after(0, lambda: status_label.config(
+            text=f"Proton-CachyOS {release['release_name']} installed successfully.", fg=COLORS["success"]))
+    except Exception as e:
+        err = str(e)
+        append_line("")
+        append_line(f"ERROR: {err}")
+        root.after(0, lambda: messagebox.showerror("Download Failed",
+                                                     f"Failed to download/install Proton-CachyOS:\n{err}",
+                                                     parent=root))
+        root.after(0, lambda: status_label.config(text=f"Proton-CachyOS download failed: {err}", fg=COLORS["danger"]))
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+def open_protoncachyos_download_dialog():
+    """Jendela untuk melihat daftar rilis Proton-CachyOS terbaru langsung dari GitHub dan
+    mendownload + memasangnya secara otomatis, tanpa perlu download manual dari browser lalu
+    'Extract Proton-CachyOS Archive...' sendiri - jadi build Proton-CachyOS bisa selalu
+    diupdate sama seperti menu Download ProtonGE Online. Karena satu rilis CachyOS bisa
+    berisi beberapa varian (SLR/Native/Standalone), tiap varian ditampilkan sebagai baris
+    terpisah supaya jelas mana yang mau dipasang."""
+    dialog = tk.Toplevel(root)
+    dialog.title("Download Proton-CachyOS")
+    dialog.configure(bg=COLORS["primary"])
+    dialog.resizable(True, True)
+    dialog.minsize(640, 480)
+    dialog.transient(root)
+    dialog.grab_set()
+
+    frame = ttk.Frame(dialog, padding=15)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    top_bar = ttk.Frame(frame)
+    top_bar.pack(fill=tk.X, pady=(0, 8))
+    ttk.Label(top_bar, text="Latest Proton-CachyOS builds (CachyOS/proton-cachyos):",
+              font=FONTS["normal"]).pack(side=tk.LEFT, anchor="w")
+
+    refresh_btn = ttk.Button(top_bar, text="Refresh", style="Custom.TButton", width=12)
+    refresh_btn.pack(side=tk.RIGHT)
+
+    status_line = ttk.Label(frame, text="Loading releases from GitHub...", font=FONTS["small"])
+    status_line.pack(anchor="w", pady=(0, 6))
+
+    list_frame = ttk.Frame(frame)
+    list_frame.pack(fill=tk.BOTH, expand=True)
+    list_frame.rowconfigure(0, weight=1)
+    list_frame.columnconfigure(0, weight=1)
+
+    vscroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+    vscroll.grid(row=0, column=1, sticky="ns")
+
+    release_tree = ttk.Treeview(list_frame,
+                                 columns=("Version", "Variant", "Published", "Size", "Status"),
+                                 show="headings",
+                                 yscrollcommand=vscroll.set,
+                                 selectmode="browse",
+                                 height=10)
+    release_tree.grid(row=0, column=0, sticky="nsew")
+    vscroll.config(command=release_tree.yview)
+
+    release_tree.heading("Version", text="Version", anchor="w")
+    release_tree.heading("Variant", text="Variant", anchor="w")
+    release_tree.heading("Published", text="Published", anchor="w")
+    release_tree.heading("Size", text="Size", anchor="w")
+    release_tree.heading("Status", text="Status", anchor="w")
+    release_tree.column("Version", width=200, anchor="w", stretch=True)
+    release_tree.column("Variant", width=90, anchor="w", stretch=False)
+    release_tree.column("Published", width=100, anchor="w", stretch=False)
+    release_tree.column("Size", width=90, anchor="w", stretch=False)
+    release_tree.column("Status", width=90, anchor="w", stretch=False)
+
+    releases_data = {}
+
+    def variant_label(asset_name):
+        n = asset_name.lower()
+        if "native" in n:
+            return "Native"
+        if "slr" in n:
+            return "SLR"
+        return "Standalone"
+
+    def populate(releases):
+        release_tree.delete(*release_tree.get_children())
+        releases_data.clear()
+        installed_names = {name for name, _ in find_protoncachyos_installations()}
+        for rel in releases:
+            iid = f"{rel['tag']}::{rel['asset_name']}"
+            releases_data[iid] = rel
+            asset_folder_name = _strip_archive_suffix(rel["asset_name"])
+            is_installed = rel["tag"] in installed_names or asset_folder_name in installed_names
+            release_tree.insert("", tk.END, iid=iid,
+                                 values=(rel["release_name"], variant_label(rel["asset_name"]),
+                                         rel["published_at"], human_size(rel["size"]),
+                                         "Installed" if is_installed else ""))
+
+    def load_releases():
+        status_line.config(text="Loading releases from GitHub...")
+        refresh_btn.config(state="disabled")
+
+        def worker():
+            try:
+                releases = fetch_protoncachyos_releases()
+                error = None
+            except Exception as e:
+                releases = []
+                error = str(e)
+
+            def finish():
+                refresh_btn.config(state="normal")
+                if error:
+                    status_line.config(text=f"Failed to load releases: {error}")
+                    messagebox.showerror(
+                        "Error",
+                        f"Failed to fetch Proton-CachyOS release list from GitHub:\n{error}\n\n"
+                        "Check your internet connection and try Refresh again.",
+                        parent=dialog
+                    )
+                else:
+                    status_line.config(text=f"{len(releases)} build(s) loaded.")
+                    populate(releases)
+
+            root.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    refresh_btn.config(command=load_releases)
+    load_releases()
+
+    btn_row = ttk.Frame(frame)
+    btn_row.pack(pady=(10, 0))
+
+    def get_selected_release():
+        sel = release_tree.selection()
+        if not sel:
+            messagebox.showinfo("Info", "Select a build from the list first.", parent=dialog)
+            return None
+        return releases_data.get(sel[0])
+
+    def do_download():
+        rel = get_selected_release()
+        if not rel:
+            return
+        if not messagebox.askyesno(
+            "Download & Install Proton-CachyOS",
+            f"Download and install Proton-CachyOS {rel['release_name']} ({variant_label(rel['asset_name'])})?\n\n"
+            f"File: {rel['asset_name']}\n"
+            f"Size: {human_size(rel['size'])}\n\n"
+            f"It will be extracted into:\n{protoncachyos_dir}",
+            parent=dialog
+        ):
+            return
+
+        append_line, set_progress, win = open_task_log_window(
+            f"Download Proton-CachyOS - {rel['release_name']}", modal_parent=dialog)
+        append_line(f"Release: {rel['release_name']} ({rel['tag']}) - {rel['asset_name']}")
+        append_line("")
+        threading.Thread(target=download_and_install_protoncachyos_worker, args=(rel, append_line, set_progress),
+                          daemon=True).start()
+
+    def do_open_page():
+        webbrowser.open(PROTONCACHYOS_RELEASES_PAGE)
+
+    ttk.Button(btn_row, text="Download & Install", style="Custom.TButton", width=18,
+               command=do_download).grid(row=0, column=0, padx=3)
+    ttk.Button(btn_row, text="Open Releases Page", style="Custom.TButton", width=18,
+               command=do_open_page).grid(row=0, column=1, padx=3)
+
+    dialog.update_idletasks()
+    x = root.winfo_rootx() + (root.winfo_width() - 720) // 2
+    y = root.winfo_rooty() + (root.winfo_height() - 560) // 2
+    dialog.geometry(f"720x560+{max(x, 0)}+{max(y, 0)}")
 
 def generate_next_prefix_code(runner_key):
     """Generate kode prefix baru secara berurutan (GAME001, GAME002, ...) untuk runner_key
@@ -1089,7 +1613,7 @@ def open_winetricks_dialog(entry, parent_dialog=None):
                         style="Custom.TCheckbutton").grid(
             row=i // columns, column=i % columns, sticky="w", padx=(0, 20), pady=2)
 
-    ttk.Label(frame, text="Additional/custom verb(s) (dipisah spasi):",
+    ttk.Label(frame, text="Additional/custom verb(s) (space separated):",
               font=FONTS["small"]).pack(anchor="w", pady=(12, 2))
     custom_entry = ttk.Entry(frame, width=64, font=FONTS["normal"])
     custom_entry.pack(fill=tk.X, pady=(0, 14))
@@ -2111,9 +2635,8 @@ def open_prefix_manager_dialog():
     """Dialog utama untuk memanajemen konfigurasi per-prefix: menampilkan semua prefix Wine/
     Proton GE/Proton-CachyOS yang sudah pernah dibuat (beserta nama game/aplikasi yang
     memakainya), lalu memungkinkan membuka winecfg, Wine Explorer, uninstaller Windows, atau
-    Winetricks KHUSUS untuk prefix yang dipilih saja. Jendelanya bisa di-resize bebas, ada
-    scrollbar horizontal untuk kolom yang kepotong, dan tombol Maximize/Restore sendiri
-    (tidak semua window manager menampilkan tombol maximize bawaan untuk Toplevel Tk)."""
+    Winetricks KHUSUS untuk prefix yang dipilih saja. Jendelanya bisa di-resize bebas, dan ada
+    scrollbar horizontal untuk kolom yang kepotong."""
     prefixes = list_all_known_prefixes()
 
     dialog = tk.Toplevel(root)
@@ -2133,36 +2656,8 @@ def open_prefix_manager_dialog():
     ttk.Label(top_bar, text="Select a prefix to configure (winecfg / explorer / uninstaller / winetricks):",
               font=FONTS["normal"]).pack(side=tk.LEFT, anchor="w")
 
-    maximize_btn = ttk.Button(top_bar, text="🗖 Maximize", style="Custom.TButton", width=14)
-    maximize_btn.pack(side=tk.RIGHT)
-
-    refresh_btn = ttk.Button(top_bar, text="🔄 Refresh", style="Custom.TButton", width=12)
+    refresh_btn = ttk.Button(top_bar, text="Refresh", style="Custom.TButton", width=12)
     refresh_btn.pack(side=tk.RIGHT, padx=(0, 6))
-
-    def toggle_maximize():
-        # '-zoomed' adalah atribut khas X11/Linux untuk maximize window - dipakai duluan
-        # karena aplikasi ini memang untuk Linux (wine/proton). Kalau window manager-nya
-        # tidak mendukung atribut ini, jatuhkan ke cara manual: samakan ukuran & posisi
-        # dialog dengan ukuran layar penuh.
-        try:
-            is_zoomed = bool(dialog.attributes("-zoomed"))
-        except tk.TclError:
-            is_zoomed = False
-
-        if is_zoomed:
-            try:
-                dialog.attributes("-zoomed", False)
-            except tk.TclError:
-                pass
-            maximize_btn.config(text="🗖 Maximize")
-        else:
-            try:
-                dialog.attributes("-zoomed", True)
-            except tk.TclError:
-                dialog.geometry(f"{dialog.winfo_screenwidth()}x{dialog.winfo_screenheight()}+0+0")
-            maximize_btn.config(text="🗗 Restore")
-
-    maximize_btn.config(command=toggle_maximize)
 
     list_frame = ttk.Frame(frame)
     list_frame.pack(fill=tk.BOTH, expand=True)
@@ -2298,13 +2793,6 @@ def open_prefix_manager_dialog():
     def do_restore():
         open_restore_backup_dialog(parent_dialog=dialog)
 
-    btn_row2 = ttk.Frame(frame)
-    btn_row2.pack(pady=(8, 0))
-    ttk.Button(btn_row2, text="Backup Prefix + Game...", style="Custom.TButton", width=22,
-               command=do_backup).grid(row=0, column=0, padx=3)
-    ttk.Button(btn_row2, text="Restore Backup...", style="Custom.TButton", width=18,
-               command=do_restore).grid(row=0, column=1, padx=3)
-
     def do_remove_prefix():
         entry = get_selected_entry()
         if not entry:
@@ -2318,14 +2806,14 @@ def open_prefix_manager_dialog():
             prefixes[:] = [e for e in prefixes
                            if not (e["runner"] == entry["runner"] and e["prefix_code"] == entry["prefix_code"])]
 
-    btn_row3 = ttk.Frame(frame)
-    btn_row3.pack(pady=(8, 0))
-    ttk.Button(btn_row3, text="🗑 Remove Prefix + Game(s)...", style="Custom.TButton", width=26,
-               command=do_remove_prefix).grid(row=0, column=0, padx=3)
-
-    close_row = ttk.Frame(frame)
-    close_row.pack(pady=(10, 0))
-    ttk.Button(close_row, text="Close", command=dialog.destroy, style="Custom.TButton", width=12).pack()
+    btn_row2 = ttk.Frame(frame)
+    btn_row2.pack(pady=(8, 0))
+    ttk.Button(btn_row2, text="Backup Apps", style="Custom.TButton", width=12,
+               command=do_backup).grid(row=0, column=0, padx=3)
+    ttk.Button(btn_row2, text="Restore Apps", style="Custom.TButton", width=12,
+               command=do_restore).grid(row=0, column=1, padx=3)
+    ttk.Button(btn_row2, text="Remove Apps", style="Custom.TButton", width=12,
+               command=do_remove_prefix).grid(row=0, column=2, padx=3)
 
     # Ukuran awal dibuat cukup lega untuk menampung kolom Game(s) yang baru, tapi jendela
     # tetap bisa di-resize/maximize bebas oleh pengguna (lihat resizable(True, True) diatas).
@@ -2668,9 +3156,9 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
         btn_row = ttk.Frame(panel)
         btn_row.pack(anchor="w", pady=(0, 8))
 
-        move_btn = ttk.Button(btn_row, text="🚚 Move Prefix...", style="Custom.TButton")
-        browse_btn = ttk.Button(btn_row, text="📁 Browse Other Folder/Disk...", style="Custom.TButton")
-        default_btn = ttk.Button(btn_row, text="↺ Use Default (WLM Folder)", style="Custom.TButton")
+        move_btn = ttk.Button(btn_row, text="Move Prefix...", style="Custom.TButton")
+        browse_btn = ttk.Button(btn_row, text="Browse Other Folder/Disk...", style="Custom.TButton")
+        default_btn = ttk.Button(btn_row, text="Use Default (WLM Folder)", style="Custom.TButton")
 
         def refresh():
             for w in (move_btn, browse_btn, default_btn):
@@ -3369,6 +3857,7 @@ def run_script():
     commands = {
         "Normal": ["bash", str(script_path)],
         "GalliumHUD": ["bash", "-c", f"GALLIUM_HUD=GPU-load+cpu+fps \"{str(script_path)}\""],
+        "VulkanHUD": ["bash", "-c", f"DXVK_HUD=full \"{str(script_path)}\""],
         "MangoHud-GL": ["bash", "-c", f"mangohud --dlsym \"{str(script_path)}\""],
         "Mangohud": ["bash", "-c", f"mangohud \"{str(script_path)}\""]
     }
@@ -3413,6 +3902,24 @@ def run_script():
         status_label.config(text=f"Error: Launcher command not found.", fg=COLORS["danger"])
     except Exception as e:
         status_label.config(text=f"Error launching script: {str(e)}", fg=COLORS["danger"])
+
+def reset_button_hover_state(btn):
+    """Ttk's 'active' (hover-highlight) state normally gets cleared by a real mouse <Leave>
+    event, but that event can get lost when a button's command opens a modal dialog
+    (grab_set, seperti ask_runner_choice) or launches an external, focus-stealing program
+    (game) right in the middle of the click. Akibatnya tombol tetap terlihat menyala
+    (warna hover) walau game sudah ditutup, sampai pengguna mengarahkan mouse ke tombol lain
+    dulu (yang barulah memaksa Tk menyadari statenya sudah tidak sesuai). Fungsi ini
+    membersihkan flag tersebut secara manual lalu menentukan ulang state-nya dari posisi
+    pointer mouse yang sebenarnya saat ini, supaya highlight-nya tetap benar (bukan cuma
+    dimatikan paksa walau mouse masih diatas tombol)."""
+    try:
+        btn.state(["!pressed", "!active"])
+        x, y = btn.winfo_pointerxy()
+        if btn.winfo_containing(x, y) is btn:
+            btn.state(["active"])
+    except Exception:
+        pass
 
 def add_script():
     """Add a new script"""
@@ -3943,11 +4450,18 @@ theme_combo.pack(side=tk.LEFT, padx=(0, 15))
 theme_combo.bind("<<ComboboxSelected>>", on_theme_selected)
 
 # Settings button & menu
-settings_btn = ttk.Button(toolbar, text="⚙ SETTINGS", style="Custom.TButton")
+settings_btn = ttk.Button(toolbar, text="SETTINGS", style="Custom.TButton")
 all_buttons.append(settings_btn)
 settings_btn.pack(side=tk.RIGHT)
 
+install_apps_btn = ttk.Button(toolbar, text="INSTALL APPS", command=run_exe_setup, style="Custom.TButton")
+all_buttons.append(install_apps_btn)
+install_apps_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
 settings_menu = tk.Menu(root, tearoff=0)
+settings_menu.add_command(label="View Logs",
+                          command=view_logs)
+settings_menu.add_separator()
 settings_menu.add_command(label="Prefix Configuration Manager...",
                           command=open_prefix_manager_dialog)
 settings_menu.add_separator()
@@ -3962,11 +4476,15 @@ settings_menu.add_command(label="Wine Explorer",
 settings_menu.add_separator()
 settings_menu.add_command(label="Extract Proton GE Archive...",
                           command=extract_protonge_archive)
+settings_menu.add_command(label="Download ProtonGE Online...",
+                          command=open_protonge_download_dialog)
 settings_menu.add_command(label="Open Proton GE Folder",
                           command=open_protonge_folder)
 settings_menu.add_separator()
 settings_menu.add_command(label="Extract Proton-CachyOS Archive...",
                           command=extract_protoncachyos_archive)
+settings_menu.add_command(label="Download Proton-CachyOS Online...",
+                          command=open_protoncachyos_download_dialog)
 settings_menu.add_command(label="Open Proton-CachyOS Folder",
                           command=open_protoncachyos_folder)
 settings_menu.add_separator()
@@ -4034,7 +4552,7 @@ launch_label = ttk.Label(controls_frame, text="Launch Mode:", font=FONTS["normal
 launch_label.pack(side=tk.LEFT, padx=(0, 5))
 
 launch_mode_combo = ttk.Combobox(controls_frame,
-                                    values=["Normal", "GalliumHUD", "MangoHud-GL", "Mangohud"],
+                                    values=["Normal", "GalliumHUD", "VulkanHUD", "MangoHud-GL", "Mangohud"],
                                     state="readonly",
                                     width=12,
                                     font=FONTS["normal"])
@@ -4114,7 +4632,9 @@ info_label.pack(pady=(0, 10))
 btn_row1 = ttk.Frame(button_panel)
 btn_row1.pack(pady=3)
 
-play_btn = ttk.Button(btn_row1, text="▶ PLAY", command=run_script, style="Custom.TButton", width=12)
+play_btn = ttk.Button(btn_row1, text="▶ PLAY",
+                       command=lambda: (run_script(), reset_button_hover_state(play_btn)),
+                       style="Custom.TButton", width=12)
 all_buttons.append(play_btn)
 play_btn.grid(row=0, column=0, padx=3, pady=3)
 
@@ -4122,7 +4642,7 @@ add_btn = ttk.Button(btn_row1, text="+ ADD", command=add_script, style="Custom.T
 all_buttons.append(add_btn)
 add_btn.grid(row=0, column=1, padx=3, pady=3)
 
-remove_btn = ttk.Button(btn_row1, text="🗑 REMOVE", command=remove_script, style="Custom.TButton", width=12)
+remove_btn = ttk.Button(btn_row1, text="REMOVE", command=remove_script, style="Custom.TButton", width=12)
 all_buttons.append(remove_btn)
 remove_btn.grid(row=0, column=2, padx=3, pady=3)
 
@@ -4130,31 +4650,18 @@ remove_btn.grid(row=0, column=2, padx=3, pady=3)
 btn_row2 = ttk.Frame(button_panel)
 btn_row2.pack(pady=3)
 
-rename_btn = ttk.Button(btn_row2, text="✏ RENAME", command=rename_script, style="Custom.TButton", width=12)
+rename_btn = ttk.Button(btn_row2, text="RENAME", command=rename_script, style="Custom.TButton", width=12)
 all_buttons.append(rename_btn)
 rename_btn.grid(row=0, column=0, padx=3, pady=3)
 
-icon_btn = ttk.Button(btn_row2, text="🖼 ICON", command=change_icon, style="Custom.TButton", width=12)
+icon_btn = ttk.Button(btn_row2, text="ICON", command=change_icon, style="Custom.TButton", width=12)
 all_buttons.append(icon_btn)
 icon_btn.grid(row=0, column=1, padx=3, pady=3)
 
 # File Manager Button - NEW
-filemanager_btn = ttk.Button(btn_row2, text="📂 FOLDER", command=open_file_manager, style="Custom.TButton", width=12)
+filemanager_btn = ttk.Button(btn_row2, text="FOLDER", command=open_file_manager, style="Custom.TButton", width=12)
 all_buttons.append(filemanager_btn)
 filemanager_btn.grid(row=0, column=2, padx=3, pady=3)
-
-# Logs button - Row 3
-btn_row3 = ttk.Frame(button_panel)
-btn_row3.pack(pady=3)
-
-logs_btn = ttk.Button(btn_row3, text="📜 VIEW LOGS", command=view_logs, style="Custom.TButton", width=38)
-all_buttons.append(logs_btn)
-logs_btn.grid(row=0, column=0, padx=3, pady=3)
-
-# Setup button - Row 4
-setup_btn = ttk.Button(button_panel, text="APPS SETUP", command=run_exe_setup, style="Custom.TButton", width=38)
-all_buttons.append(setup_btn)
-setup_btn.pack(pady=8)
 
 # =======================================================================
 # FINAL SETUP AND RUN
