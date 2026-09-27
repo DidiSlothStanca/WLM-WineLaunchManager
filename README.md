@@ -67,9 +67,17 @@ sudo dnf install ./winelaunchmanager-x.x.x*.rpm
 ## WLM Menu & Theme
 ![Screenshot WLM](WLM_SS/2.png)
 
+### List Theme Available (ugly but ok)
+- Default (Dark Blue).
+- Dark
+- Light
+- Pinky
+- Green Zombie
 ---
 
 ## Features
+![Screenshot WLM](WLM_SS/4.png)
+### What Feature Available?
 - Manage Vanilla Wine applications via a user-friendly GUI.
 - Manage Proton GE or Proton-CachyOS in WLM, including downloading builds directly from GitHub.
 - Customizable `env_config.yaml` to override the Proton GE / Proton-CachyOS release URLs used by the "Download Online" feature.
@@ -77,9 +85,11 @@ sudo dnf install ./winelaunchmanager-x.x.x*.rpm
 - Manage your Windows apps & games prefixes, including moving a prefix to a different folder/disk.
 - Backup and restore a prefix as a `.tar.gz` archive, with live progress and the ability to cancel mid-way.
 - Uninstall applications installed within Wine.
-- Display FPS using GalliumHUD, VulkanHUD (MangoHud), with configurable metrics and scale.
 - Create and manage a shortcut list in the Launcher, with per-game icons.
 - Live log window for running games/apps and Winetricks output.
+  
+![Screenshot WLM](WLM_SS/3.png)
+- Display FPS using GalliumHUD, VulkanHUD, & MangoHud (External Configuration), with configurable metrics and scale.
 
 ---
 
