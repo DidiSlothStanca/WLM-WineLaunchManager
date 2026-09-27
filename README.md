@@ -19,6 +19,8 @@ Wine Launch Manager (WLM) is a Python3-based application for managing Vanilla Wi
    - `python3-pillow-imagetk`
    *(Use the commands below or adjust according to your distribution.)*
 
+### Note: Alternatively, you can using _**Appimage**_ version for portable apps.
+
 ---
 
 ## Install the required components or packages (Option 1 - Using *.tar.gz file)
@@ -86,8 +88,6 @@ sudo dpkg -i winelaunchmanager_x.x.x.deb -y
 ```bash
 sudo dnf install ./winelaunchmanager-x.x.x*.rpm
 ```
-
-**Note:** Alternatively, you can using _**Appimage**_ version for portable apps.
 
 ## WLM Menu & Theme
 ![Screenshot WLM](WLM_SS/01.png)
