@@ -111,7 +111,7 @@ Check which version of WLM you have installed without opening the GUI:
 
 ```bash
 $ winelaunchmanager --version
-WLM Version: 0.3.6-Beta
+WLM Version: 0.x.x-x
 Developer: Opensource OS Gathering Republic (OOGR)
 Maintener: Didi Sloth Stanca
 ```
