@@ -8,6 +8,7 @@ import queue
 import pty
 import select
 import errno
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog, messagebox
 from pathlib import Path
@@ -20,6 +21,24 @@ import urllib.error
 import webbrowser
 from datetime import datetime
 import time
+
+# =======================================================================
+# APP VERSION / IDENTITY
+# =======================================================================
+WLM_VERSION = "0.3.5-Beta"
+WLM_DEVELOPER = "Opensource OS Gathering Republic (OOGR)"
+WLM_MAINTAINER = "Didi Sloth Stanca & Ikan Goreng"
+
+def _print_version_and_exit():
+    print(f"WLM Version: {WLM_VERSION}")
+    print(f"Developer: {WLM_DEVELOPER}")
+    print(f"Maintener: {WLM_MAINTAINER}")
+    sys.exit(0)
+
+# Handle `winelaunchmanager --version` / `-v` before doing anything else
+# (no need to touch the filesystem or open a display just to print this).
+if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v"):
+    _print_version_and_exit()
 
 # Configuration paths
 directory = Path.home() / "wlm"
