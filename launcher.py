@@ -1,4 +1,5 @@
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -12,8 +13,9 @@ import sys
 import copy
 import tkinter as tk
 from tkinter import ttk, filedialog, simpledialog, messagebox
+from tkinter import font as tkfont
 from pathlib import Path
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageTk, ImageDraw, ImageChops
 import json
 import tarfile
 import tempfile
@@ -30,9 +32,9 @@ except ImportError:
     yaml = None
     _YAML_AVAILABLE = False
 
-WLM_VERSION = "0.3.5-Beta"
+WLM_VERSION = "0.4.7-Beta"
 WLM_DEVELOPER = "Opensource OS Gathering Republic (OOGR)"
-WLM_MAINTAINER = "Didi Sloth Stanca & Ikan Goreng"
+WLM_MAINTAINER = "Didi Sloth Stanca"
 
 def _print_version_and_exit():
     print(f"WLM Version: {WLM_VERSION}")
@@ -170,131 +172,218 @@ Manager bisa menampilkan lagi jendela log task yang sedang berjalan itu. Isinya 
 THEMES = {
     "default": {
         "name": "Default (Dark Blue)",
-        "primary": "#1a1a2e",
-        "secondary": "#16213e",
-        "accent": "#0f3460",
-        "highlight": "#e94560",
-        "text": "#ffffff",
-        "text_secondary": "#b0b0b0",
+        "primary": "#11131f",
+        "secondary": "#181b2b",
+        "accent": "#232844",
+        "highlight": "#5b7cfa",
+        "text": "#eef0fa",
+        "text_secondary": "#9aa1c0",
         "button_text": "#ffffff",
-        "success": "#4CAF50",
-        "warning": "#FF9800",
-        "danger": "#F44336",
-        "card_bg": "#2d3047",
-        "border": "#3a3d5c",
-        "button_bg": "#0f3460",
-        "button_fg": "#ffffff",
-        "tree_bg": "#2d3047",
-        "tree_fg": "#ffffff",
-        "tree_highlight": "#e94560",
+        "success": "#34d399",
+        "warning": "#fbbf24",
+        "danger": "#f87171",
+        "card_bg": "#1f2336",
+        "border": "#2c3150",
+        "button_bg": "#272c47",
+        "button_fg": "#e6e9f8",
+        "tree_bg": "#171a2a",
+        "tree_fg": "#e6e9f8",
+        "tree_highlight": "#5b7cfa",
         "tree_highlight_text": "#ffffff",
-        "text_background": "#1e1e35"
+        "text_background": "#141726"
     },
     "dark": {
         "name": "Dark",
-        "primary": "#121212",
-        "secondary": "#1e1e1e",
-        "accent": "#2d2d2d",
-        "highlight": "#BB86FC",
-        "text": "#ffffff",
-        "text_secondary": "#aaaaaa",
-        "button_text": "#ffffff",
-        "success": "#03DAC6",
-        "warning": "#FFB74D",
-        "danger": "#CF6679",
-        "card_bg": "#2d2d2d",
-        "border": "#404040",
-        "button_bg": "#3700B3",
-        "button_fg": "#ffffff",
-        "tree_bg": "#2d2d2d",
-        "tree_fg": "#ffffff",
-        "tree_highlight": "#BB86FC",
-        "tree_highlight_text": "#000000",
-        "text_background": "#1e1e1e"
+        "primary": "#0e0e12",
+        "secondary": "#16161c",
+        "accent": "#26262f",
+        "highlight": "#a78bfa",
+        "text": "#f1f1f5",
+        "text_secondary": "#9b9bab",
+        "button_text": "#14101f",
+        "success": "#2dd4bf",
+        "warning": "#fbbf24",
+        "danger": "#f87171",
+        "card_bg": "#1d1d25",
+        "border": "#2c2c38",
+        "button_bg": "#26262f",
+        "button_fg": "#ececf3",
+        "tree_bg": "#16161c",
+        "tree_fg": "#ececf3",
+        "tree_highlight": "#a78bfa",
+        "tree_highlight_text": "#14101f",
+        "text_background": "#121217"
     },
     "light": {
         "name": "Light",
-        "primary": "#f5f5f5",
+        "primary": "#eef0f6",
         "secondary": "#ffffff",
-        "accent": "#e0e0e0",
-        "highlight": "#6200EE",
-        "text": "#000000",
-        "text_secondary": "#666666",
+        "accent": "#e3e6f0",
+        "highlight": "#4f6df5",
+        "text": "#1b1f33",
+        "text_secondary": "#5f6680",
         "button_text": "#ffffff",
-        "success": "#00897B",
-        "warning": "#FF8F00",
-        "danger": "#C62828",
+        "success": "#0f9d74",
+        "warning": "#d97706",
+        "danger": "#d93a3a",
         "card_bg": "#ffffff",
-        "border": "#dddddd",
-        "button_bg": "#6200EE",
-        "button_fg": "#ffffff",
+        "border": "#d5d9e6",
+        "button_bg": "#e4e7f1",
+        "button_fg": "#1b1f33",
         "tree_bg": "#ffffff",
-        "tree_fg": "#000000",
-        "tree_highlight": "#6200EE",
+        "tree_fg": "#1b1f33",
+        "tree_highlight": "#4f6df5",
         "tree_highlight_text": "#ffffff",
         "text_background": "#ffffff"
     },
     "pinky": {
         "name": "Pinky",
-        "primary": "#2d1b2e",
-        "secondary": "#3d2b3f",
-        "accent": "#5d3d5f",
-        "highlight": "#f06292", 
-        "text": "#ffffff",
-        "text_secondary": "#e0c3e0",
-        "button_text": "#ffffff",
-        "success": "#8e24aa",
-        "warning": "#ffb6c1",
-        "danger": "#d81b60",
-        "card_bg": "#4a3b4c",
-        "border": "#6d5a6f",
-        "button_bg": "#e91e63",
-        "button_fg": "#ffffff",
-        "tree_bg": "#4a3b4c",
-        "tree_fg": "#ffffff",
-        "tree_highlight": "#f06292",
-        "tree_highlight_text": "#ffffff",
-        "text_background": "#3d2b3f"
+        "primary": "#1f1220",
+        "secondary": "#2a1a2c",
+        "accent": "#4a2c4d",
+        "highlight": "#f472b6",
+        "text": "#fdf2f8",
+        "text_secondary": "#d8b4d0",
+        "button_text": "#2a0f22",
+        "success": "#c084fc",
+        "warning": "#fbcfe8",
+        "danger": "#fb7185",
+        "card_bg": "#35223a",
+        "border": "#523559",
+        "button_bg": "#41284a",
+        "button_fg": "#fdf2f8",
+        "tree_bg": "#2a1a2c",
+        "tree_fg": "#fdf2f8",
+        "tree_highlight": "#f472b6",
+        "tree_highlight_text": "#2a0f22",
+        "text_background": "#241524"
     },
     "zombie": {
         "name": "Zombie Green",
-        "primary": "#1b5e20",
-        "secondary": "#2e7d32",
-        "accent": "#4caf50",
-        "highlight": "#c8e6c9", 
-        "text": "#ffffff",
-        "text_secondary": "#a0d0a0",
-        "button_text": "#ffffff", 
-        "success": "#32cd32",
-        "warning": "#adff2f",
-        "danger": "#ff4500",
-        "card_bg": "#1e3a1e",
-        "border": "#3a5f3a",
-        "button_bg": "#66bb6a",
-        "button_fg": "#1b5e20",
-        "tree_bg": "#1e3a1e",
-        "tree_fg": "#ffffff",
-        "tree_highlight": "#81c784",
-        "tree_highlight_text": "#000000",
-        "text_background": "#2e7d32"
+        "primary": "#0f1d12",
+        "secondary": "#15281a",
+        "accent": "#1f3a25",
+        "highlight": "#7ddc8a",
+        "text": "#ecf8ee",
+        "text_secondary": "#9cc3a2",
+        "button_text": "#0a2410",
+        "success": "#a3e635",
+        "warning": "#facc15",
+        "danger": "#ff6b4a",
+        "card_bg": "#1b3322",
+        "border": "#2d5036",
+        "button_bg": "#244230",
+        "button_fg": "#ecf8ee",
+        "tree_bg": "#15281a",
+        "tree_fg": "#ecf8ee",
+        "tree_highlight": "#7ddc8a",
+        "tree_highlight_text": "#0a2410",
+        "text_background": "#112016"
+    },
+    "nord": {
+        "name": "Nord",
+        "primary": "#272c36",
+        "secondary": "#2e3440",
+        "accent": "#3b4252",
+        "highlight": "#88c0d0",
+        "text": "#eceff4",
+        "text_secondary": "#a3acc0",
+        "button_text": "#1f2530",
+        "success": "#a3be8c",
+        "warning": "#ebcb8b",
+        "danger": "#bf616a",
+        "card_bg": "#353c4a",
+        "border": "#434c5e",
+        "button_bg": "#3b4252",
+        "button_fg": "#eceff4",
+        "tree_bg": "#2e3440",
+        "tree_fg": "#eceff4",
+        "tree_highlight": "#88c0d0",
+        "tree_highlight_text": "#1f2530",
+        "text_background": "#2a303b"
+    },
+    "midnight": {
+        "name": "Midnight (OLED)",
+        "primary": "#000000",
+        "secondary": "#0b0b0f",
+        "accent": "#1a1a22",
+        "highlight": "#22d3ee",
+        "text": "#f5f5f7",
+        "text_secondary": "#8d8d99",
+        "button_text": "#001418",
+        "success": "#4ade80",
+        "warning": "#fbbf24",
+        "danger": "#f87171",
+        "card_bg": "#111116",
+        "border": "#23232c",
+        "button_bg": "#1a1a22",
+        "button_fg": "#f0f0f4",
+        "tree_bg": "#08080c",
+        "tree_fg": "#f0f0f4",
+        "tree_highlight": "#22d3ee",
+        "tree_highlight_text": "#001418",
+        "text_background": "#0b0b0f"
     }
 }
 
 FONT_FAMILY = "Segoe UI"
-FONTS = {
-    "title": (FONT_FAMILY, 14, "bold"),
-    "subtitle": (FONT_FAMILY, 11, "bold"),
-    "normal": (FONT_FAMILY, 9),
-    "small": (FONT_FAMILY, 8)
-}
+FONT_CANDIDATES = ("Inter", "Segoe UI", "Noto Sans", "Cantarell", "Ubuntu", "Roboto",
+                   "Open Sans", "Source Sans 3", "DejaVu Sans")
+
+def _build_fonts(family):
+    # Ukuran key lama (title/subtitle/normal/small) sengaja TIDAK diubah supaya semua dialog
+    # tetap muat; key baru (display/heading/body) dipakai khusus jendela utama.
+    return {
+        "display": (family, 17, "bold"),
+        "heading": (family, 12, "bold"),
+        "title": (family, 14, "bold"),
+        "subtitle": (family, 11, "bold"),
+        "body": (family, 10),
+        "normal": (family, 9),
+        "small": (family, 8),
+    }
+
+FONTS = _build_fonts(FONT_FAMILY)
+
+def apply_best_font_family():
+    """Pilih font terbaik yang benar-benar terpasang (Segoe UI tidak ada di kebanyakan distro
+    Linux sehingga teks jatuh ke font bawaan Tk yang tampak kuno). Dipanggil setelah root dibuat."""
+    global FONT_FAMILY
+    try:
+        installed = {name.lower(): name for name in tkfont.families()}
+    except tk.TclError:
+        return
+    chosen = None
+    for candidate in FONT_CANDIDATES:
+        if candidate.lower() in installed:
+            chosen = installed[candidate.lower()]
+            break
+    if chosen is None:
+        try:
+            chosen = tkfont.nametofont("TkDefaultFont").actual("family")
+        except tk.TclError:
+            return
+    FONT_FAMILY = chosen
+    FONTS.update(_build_fonts(chosen))
+    for named in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
+                  "TkCaptionFont", "TkTooltipFont"):
+        try:
+            tkfont.nametofont(named).configure(family=chosen)
+        except tk.TclError:
+            pass
 
 ICON_SIZE = 250
-ICON_WIDTH = ICON_SIZE
-ICON_HEIGHT = ICON_SIZE
+ICON_WIDTH = 190      # ukuran tampil di panel detail (file ikon tetap disimpan 250px)
+ICON_HEIGHT = 190
+
+library_view_config_file = directory / "library_view.json"
+library_grid = None      # LibraryGrid (game_covers.py); tetap None kalau game_covers.py tidak ada
+cover_store = None       # CoverStore: cover otomatis/manual di ~/wlm/covers
 
 def load_config():
     """Load all configurations from file with validation"""
-    config = {"theme": "default", "window_size": "1000x720", "window_position": None}
+    config = {"theme": "default", "window_size": "1000x720", "window_position": None,
+              "window_maximized": False, "sash": None}
     
     if theme_config_file.exists():
         try:
@@ -311,6 +400,10 @@ def load_config():
                 
                 loaded_size = window_config.get('size', '1000x720')
                 loaded_position = window_config.get('position', None)
+                config["window_maximized"] = window_config.get('maximized') is True
+                loaded_sash = window_config.get('sash')
+                if isinstance(loaded_sash, int) and not isinstance(loaded_sash, bool) and loaded_sash > 0:
+                    config["sash"] = loaded_sash
 
                 if 'x' in loaded_size and loaded_size.count('x') == 1:
                     config["window_size"] = loaded_size
@@ -325,25 +418,84 @@ def load_config():
     
     return config
 
+_last_normal_geometry = {"size": None, "position": None}   # ukuran/posisi 'normal' terakhir (bukan saat maximize)
+_manual_zoom = {"on": False}                                # maximize manual (kalau WM tidak mendukung)
+
+def _is_maximized():
+    """True kalau jendela utama sedang maximize. Di Linux/X11 Tk selalu melaporkan state 'normal'
+    walau jendela di-maximize window manager, jadi atribut '-zoomed' juga dicek."""
+    if _manual_zoom["on"]:
+        return True
+    try:
+        if root.state() == "zoomed":
+            return True
+    except tk.TclError:
+        pass
+    try:
+        return str(root.attributes("-zoomed")).strip().lower() in ("1", "true", "yes")
+    except tk.TclError:
+        return False
+
+def _set_maximized(on):
+    """Maximize/kembalikan jendela utama lewat window manager. True kalau berhasil."""
+    for attempt in (lambda: root.attributes("-zoomed", on),
+                    lambda: root.state("zoomed" if on else "normal")):
+        try:
+            attempt()
+            return True
+        except tk.TclError:
+            continue
+    return False
+
+_sash_state = {"restored": False}   # sash baru boleh disimpan setelah posisi lama selesai dipulihkan
+
+def _read_saved_sash():
+    try:
+        with open(window_config_file, 'r') as f:
+            value = json.load(f).get("sash")
+        return value if isinstance(value, int) else None
+    except Exception:
+        return None
+
 def save_window_config():
-    """Save window size and position in a complete and clean format"""
+    """Simpan ukuran + posisi jendela dan apakah jendela sedang maximize. Saat maximize, yang
+    disimpan tetap ukuran/posisi NORMAL terakhir (bukan ukuran layar penuh), jadi kalau jendela
+    dikembalikan (un-maximize) ukurannya tetap yang Anda atur - dan flag 'maximized' membuat
+    jendela dibuka maximize lagi pada sesi berikutnya."""
     if root.winfo_exists():
-        width = root.winfo_width()
-        height = root.winfo_height()
-        size = f"{width}x{height}"
-        
-        pos_x = root.winfo_x()
-        pos_y = root.winfo_y()
-        position = f"+{pos_x}+{pos_y}" 
-        
+        maximized = _is_maximized()
+        if not maximized:
+            _last_normal_geometry["size"] = f"{root.winfo_width()}x{root.winfo_height()}"
+            _last_normal_geometry["position"] = f"+{root.winfo_x()}+{root.winfo_y()}"
+        size, position = _last_normal_geometry["size"], _last_normal_geometry["position"]
+        if size is None:       # belum pernah normal di sesi ini: pertahankan yang sudah tersimpan
+            try:
+                with open(window_config_file, 'r') as f:
+                    saved = json.load(f)
+                size, position = saved.get("size"), saved.get("position")
+            except Exception:
+                pass
+
         config_data = {
-            "size": size,
-            "position": position
+            "size": size or "1000x720",
+            "position": position,
+            "maximized": maximized
         }
-        
+        # Lebar panel library (grid/list) vs panel detail judul+cover = posisi pembatas (sash).
+        sash = None
+        if _sash_state["restored"]:
+            try:
+                sash = int(main_container.sashpos(0))
+            except Exception:
+                sash = None
+        if sash is None:
+            sash = _read_saved_sash()
+        if sash is not None:
+            config_data["sash"] = sash
+
         try:
             with open(window_config_file, 'w') as f:
-                json.dump(config_data, f, indent=4) 
+                json.dump(config_data, f, indent=4)
         except Exception as e:
             print(f"Error saving window config: {e}")
 
@@ -551,7 +703,58 @@ def fetch_protonge_releases(limit=100):
         })
     return releases
 
-def download_and_install_protonge_worker(release, append_line, set_progress=None):
+def download_url_pausable(url, dest_path, total_size, append_line, set_progress=None, pause_event=None):
+    """Download url ke dest_path (blocking, panggil dari background thread) dengan dukungan
+    PAUSE. pause_event: threading.Event; selama event ter-set, download dijeda. Saat dijeda
+    koneksi ditutup (bukan ditahan terbuka, supaya tidak di-timeout server) dan saat dilanjutkan
+    koneksi dibuka lagi dengan header Range dari byte terakhir. Kalau server mengabaikan Range,
+    download diulang dari awal. Return jumlah byte yang terunduh."""
+    downloaded = 0
+    last_report = 0.0
+    dest_path = Path(dest_path)
+    dest_path.write_bytes(b"")
+    while True:
+        headers = {"User-Agent": "wine-launcher-manager"}
+        if downloaded:
+            headers["Range"] = f"bytes={downloaded}-"
+        req = urllib.request.Request(url, headers=headers)
+        paused = False
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if downloaded and getattr(resp, "status", 200) != 206:
+                append_line("  Server ignored the resume request - restarting from the beginning.")
+                downloaded = 0
+                dest_path.write_bytes(b"")
+            with open(dest_path, "ab") as out_file:
+                while True:
+                    if pause_event is not None and pause_event.is_set():
+                        paused = True
+                        break
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    out_file.write(chunk)
+                    downloaded += len(chunk)
+                    now = time.time()
+                    if now - last_report > 0.2:
+                        if total_size:
+                            pct = downloaded * 100 / total_size
+                            append_line(f"  {human_size(downloaded)} / {human_size(total_size)} ({pct:.0f}%)")
+                            if set_progress:
+                                set_progress(pct)
+                        else:
+                            append_line(f"  {human_size(downloaded)} downloaded...")
+                        last_report = now
+        if not paused:
+            return downloaded
+        append_line("")
+        append_line(f"Paused at {human_size(downloaded)}. Click Resume to continue.")
+        while pause_event.is_set():
+            time.sleep(0.2)
+        append_line(f"Resuming from {human_size(downloaded)}...")
+        last_report = 0.0
+
+def download_and_install_protonge_worker(release, append_line, set_progress=None,
+                                          pause_event=None, win=None):
     """Berjalan di background thread: download asset .tar.gz milik satu rilis ProtonGE dari
     GitHub (dengan progress live via append_line + set_progress kalau ukurannya diketahui),
     lalu ekstrak ke ~/wlm/protonge/ lewat extract_archive_to_dir (fungsi yang sama dipakai
@@ -563,31 +766,15 @@ def download_and_install_protonge_worker(release, append_line, set_progress=None
         append_line(f"Downloading {release['asset_name']} ({human_size(total_size)})...")
 
         tmp_fd, tmp_name = tempfile.mkstemp(prefix="wlm_protonge_", suffix=".tar.gz")
+        os.close(tmp_fd)
         tmp_path = Path(tmp_name)
 
-        req = urllib.request.Request(url, headers={"User-Agent": "wine-launcher-manager"})
-        downloaded = 0
-        last_report = 0.0
-        with urllib.request.urlopen(req, timeout=30) as resp, os.fdopen(tmp_fd, "wb") as out_file:
-            while True:
-                chunk = resp.read(1024 * 256)
-                if not chunk:
-                    break
-                out_file.write(chunk)
-                downloaded += len(chunk)
-                now = time.time()
-                if now - last_report > 0.2:
-                    if total_size:
-                        pct = downloaded * 100 / total_size
-                        append_line(f"  {human_size(downloaded)} / {human_size(total_size)} ({pct:.0f}%)")
-                        if set_progress:
-                            set_progress(pct)
-                    else:
-                        append_line(f"  {human_size(downloaded)} downloaded...")
-                    last_report = now
+        downloaded = download_url_pausable(url, tmp_path, total_size, append_line, set_progress, pause_event)
 
         if set_progress and total_size:
             set_progress(100)
+        if win is not None:      # sesudah download, ekstrak tidak bisa di-pause
+            root.after(0, lambda: getattr(win, "disable_pause", lambda: None)())
 
         append_line("")
         append_line(f"Download complete ({human_size(downloaded)}). Extracting to {protonge_dir}...")
@@ -621,7 +808,7 @@ def open_protonge_download_dialog():
     dialog.title("Download ProtonGE")
     dialog.configure(bg=COLORS["primary"])
     dialog.resizable(True, True)
-    dialog.minsize(640, 480)
+    dialog.minsize(760, 480)
 
     frame = ttk.Frame(dialog, padding=15)
     frame.pack(fill=tk.BOTH, expand=True)
@@ -646,7 +833,7 @@ def open_protonge_download_dialog():
     vscroll.grid(row=0, column=1, sticky="ns")
 
     release_tree = ttk.Treeview(list_frame,
-                                 columns=("Version", "Published", "Size", "Status"),
+                                 columns=("Version", "File", "Published", "Size", "Status"),
                                  show="headings",
                                  yscrollcommand=vscroll.set,
                                  selectmode="browse",
@@ -655,10 +842,12 @@ def open_protonge_download_dialog():
     vscroll.config(command=release_tree.yview)
 
     release_tree.heading("Version", text="Version", anchor="w")
+    release_tree.heading("File", text="File", anchor="w")
     release_tree.heading("Published", text="Published", anchor="w")
     release_tree.heading("Size", text="Size", anchor="w")
     release_tree.heading("Status", text="Status", anchor="w")
-    release_tree.column("Version", width=220, anchor="w", stretch=True)
+    release_tree.column("Version", width=170, anchor="w", stretch=False)
+    release_tree.column("File", width=260, anchor="w", stretch=True)
     release_tree.column("Published", width=110, anchor="w", stretch=False)
     release_tree.column("Size", width=90, anchor="w", stretch=False)
     release_tree.column("Status", width=100, anchor="w", stretch=False)
@@ -675,7 +864,7 @@ def open_protonge_download_dialog():
             asset_folder_name = rel["asset_name"][:-len(".tar.gz")] if rel["asset_name"].lower().endswith(".tar.gz") else rel["asset_name"]
             is_installed = rel["tag"] in installed_names or asset_folder_name in installed_names
             release_tree.insert("", tk.END, iid=iid,
-                                 values=(rel["name"], rel["published_at"], human_size(rel["size"]),
+                                 values=(rel["name"], rel["asset_name"], rel["published_at"], human_size(rel["size"]),
                                          "Installed" if is_installed else ""))
 
     def load_releases():
@@ -735,11 +924,13 @@ def open_protonge_download_dialog():
         ):
             return
 
-        append_line, set_progress, win = open_task_log_window(f"Download ProtonGE - {rel['tag']}", modal_parent=dialog)
+        pause_event = threading.Event()
+        append_line, set_progress, win = open_task_log_window(f"Download ProtonGE - {rel['tag']}",
+                                                               modal_parent=dialog, pause_event=pause_event)
         append_line(f"Release: {rel['name']} ({rel['tag']})")
         append_line("")
-        threading.Thread(target=download_and_install_protonge_worker, args=(rel, append_line, set_progress),
-                          daemon=True).start()
+        threading.Thread(target=download_and_install_protonge_worker,
+                          args=(rel, append_line, set_progress, pause_event, win), daemon=True).start()
 
     def do_open_page():
         webbrowser.open(PROTONGE_RELEASES_PAGE)
@@ -750,14 +941,14 @@ def open_protonge_download_dialog():
                command=do_open_page).grid(row=0, column=1, padx=3)
 
     dialog.update_idletasks()
-    x = root.winfo_rootx() + (root.winfo_width() - 720) // 2
+    x = root.winfo_rootx() + (root.winfo_width() - 900) // 2
     y = root.winfo_rooty() + (root.winfo_height() - 560) // 2
-    dialog.geometry(f"720x560+{max(x, 0)}+{max(y, 0)}")
+    dialog.geometry(f"900x560+{max(x, 0)}+{max(y, 0)}")
     dialog.deiconify()
     dialog.transient(root)
     dialog.grab_set()
     dialog.lift()
-    dialog.focus_force()
+    dialog.focus_set()
 
 PROTONCACHYOS_RELEASES_API = ENV_CONFIG["proton_cachyos"]["releases_api"]
 PROTONCACHYOS_RELEASES_PAGE = ENV_CONFIG["proton_cachyos"]["releases_page"]
@@ -769,6 +960,109 @@ def _strip_archive_suffix(name):
         if name.lower().endswith(suf):
             return name[:-len(suf)]
     return name
+
+def detect_cpu_profile():
+    """Profil CPU untuk memilih build Proton yang cocok. Dibaca dari /proc/cpuinfo (sekali saja).
+    level = tingkat mikroarsitektur x86-64 (1-4; 0 = tidak diketahui)."""
+    if _CPU_PROFILE:
+        return _CPU_PROFILE
+    machine = platform.machine().lower()
+    flags, vendor = set(), ""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("flags") and not flags:
+                    flags = set(line.split(":", 1)[1].split())
+                elif line.startswith("vendor_id") and not vendor:
+                    vendor = line.split(":", 1)[1].strip()
+                if flags and vendor:
+                    break
+    except OSError:
+        pass
+    level = 0
+    if machine in ("x86_64", "amd64") and flags:
+        v2 = {"cx16", "lahf_lm", "popcnt", "sse4_1", "sse4_2", "ssse3"}
+        v3 = v2 | {"avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "abm", "movbe", "xsave"}
+        v4 = v3 | {"avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl"}
+        level = 4 if v4 <= flags else 3 if v3 <= flags else 2 if v2 <= flags else 1
+    if machine in ("aarch64", "arm64"):
+        text = "ARM64 (aarch64)"
+    elif level:
+        text = f"x86-64-v{level}" + (" (AMD)" if vendor == "AuthenticAMD" else " (Intel)" if vendor == "GenuineIntel" else "")
+    else:
+        text = machine or "unknown"
+    _CPU_PROFILE.update(machine=machine, flags=flags, vendor=vendor, level=level, text=text)
+    return _CPU_PROFILE
+
+_CPU_PROFILE = {}
+
+def proton_asset_arch(asset_name):
+    """(label, key) arsitektur dari nama asset Proton. key: 'v1'..'v4' | 'znverN' | 'arm64' | None.
+    Contoh: '...-x86_64_v3.tar.xz' -> ('x86-64-v3', 'v3'); '...-znver4' -> ('AMD Zen 4 (znver4)', 'znver4')."""
+    n = _strip_archive_suffix(asset_name).lower()
+    m = re.search(r"znver(\d)", n)
+    if m:
+        return f"AMD Zen {m.group(1)} (znver{m.group(1)})", f"znver{m.group(1)}"
+    m = re.search(r"x86[_-]64[_-]v([1-4])", n)
+    if m:
+        return f"x86-64-v{m.group(1)}", f"v{m.group(1)}"
+    if re.search(r"aarch64|arm64", n):
+        return "ARM64 (aarch64)", "arm64"
+    if re.search(r"x86[_-]64|amd64", n):
+        return "x86-64 (standard)", "v1"
+    return "not stated", None
+
+def proton_arch_compat(key, cpu):
+    """True / False = build itu bisa / tidak bisa jalan di CPU ini; None = tidak diketahui."""
+    if key is None or not cpu:
+        return None
+    is_x86 = cpu["machine"] in ("x86_64", "amd64")
+    if key == "arm64":
+        return not is_x86 and cpu["machine"] in ("aarch64", "arm64")
+    if not is_x86:
+        return False
+    if not cpu["level"]:
+        return None
+    if key.startswith("v"):
+        return cpu["level"] >= int(key[1])
+    if key.startswith("znver"):
+        if cpu["vendor"] != "AuthenticAMD":
+            return False
+        n, fl = int(key[5:]), cpu["flags"]
+        if n <= 2:
+            return cpu["level"] >= 3
+        return ("vaes" if n == 3 else "avx512_bf16" if n == 4 else "avx512_vp2intersect") in fl
+    return None
+
+def proton_arch_rank(key):
+    """Makin tinggi = makin dioptimalkan (dipakai untuk menandai 'Recommended')."""
+    if key and key.startswith("znver"):
+        return 5
+    return {"v1": 1, "v2": 2, "v3": 3, "v4": 4, "arm64": 1}.get(key, 0)
+
+def place_dialog(dialog, parent_win=None):
+    """Taruh dialog di TENGAH induknya, tapi selalu utuh di dalam layar (sisakan ruang title bar di
+    atas dan taskbar di bawah). Aman dipanggil berulang, mis. setelah isi dialog berubah tinggi."""
+    try:
+        if not dialog.winfo_exists():
+            return
+        dialog.update_idletasks()
+        sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
+        w, h = min(dialog.winfo_reqwidth(), sw - 20), min(dialog.winfo_reqheight(), sh - 90)
+        if parent_win is not None and parent_win.winfo_exists():
+            cx = parent_win.winfo_rootx() + parent_win.winfo_width() // 2
+            cy = parent_win.winfo_rooty() + parent_win.winfo_height() // 2
+        else:
+            cx, cy = sw // 2, sh // 2
+        x = max(0, min(cx - w // 2, sw - w - 10))
+        y = max(10, min(cy - h // 2, sh - h - 70))
+        dialog.geometry(f"+{x}+{y}")
+    except tk.TclError:
+        pass
+
+def fit_combo_width(values, minimum=32, maximum=76):
+    """Lebar Combobox (karakter) supaya nama terpanjang tidak terpotong."""
+    return max(minimum, min(maximum, max((len(str(v)) for v in values), default=0) + 3))
 
 def fetch_protoncachyos_releases(limit=20):
     """Ambil daftar rilis Proton-CachyOS terbaru langsung dari GitHub (CachyOS/proton-cachyos).
@@ -806,7 +1100,8 @@ def fetch_protoncachyos_releases(limit=20):
             })
     return releases
 
-def download_and_install_protoncachyos_worker(release, append_line, set_progress=None):
+def download_and_install_protoncachyos_worker(release, append_line, set_progress=None,
+                                              pause_event=None, win=None):
     """Berjalan di background thread: download asset arsip milik satu build Proton-CachyOS
     dari GitHub (dengan progress live via append_line + set_progress kalau ukurannya
     diketahui), lalu ekstrak ke ~/wlm/protoncachyos/ lewat extract_archive_to_dir (fungsi
@@ -821,40 +1116,25 @@ def download_and_install_protoncachyos_worker(release, append_line, set_progress
         suffix = next((s for s in ARCHIVE_SUFFIXES if asset_name.lower().endswith(s)),
                        Path(asset_name).suffix)
         tmp_fd, tmp_name = tempfile.mkstemp(prefix="wlm_protoncachyos_", suffix=suffix)
+        os.close(tmp_fd)
         tmp_path = Path(tmp_name)
 
-        req = urllib.request.Request(url, headers={"User-Agent": "wine-launcher-manager"})
-        downloaded = 0
-        last_report = 0.0
-        with urllib.request.urlopen(req, timeout=30) as resp, os.fdopen(tmp_fd, "wb") as out_file:
-            while True:
-                chunk = resp.read(1024 * 256)
-                if not chunk:
-                    break
-                out_file.write(chunk)
-                downloaded += len(chunk)
-                now = time.time()
-                if now - last_report > 0.2:
-                    if total_size:
-                        pct = downloaded * 100 / total_size
-                        append_line(f"  {human_size(downloaded)} / {human_size(total_size)} ({pct:.0f}%)")
-                        if set_progress:
-                            set_progress(pct)
-                    else:
-                        append_line(f"  {human_size(downloaded)} downloaded...")
-                    last_report = now
+        downloaded = download_url_pausable(url, tmp_path, total_size, append_line, set_progress, pause_event)
 
         if set_progress and total_size:
             set_progress(100)
+        if win is not None:      # sesudah download, ekstrak tidak bisa di-pause
+            root.after(0, lambda: getattr(win, "disable_pause", lambda: None)())
 
         append_line("")
         append_line(f"Download complete ({human_size(downloaded)}). Extracting to {protoncachyos_dir}...")
         extract_archive_to_dir(tmp_path, protoncachyos_dir)
 
         append_line("")
-        append_line(f"Proton-CachyOS {release['release_name']} installed successfully.")
+        full_name = _strip_archive_suffix(release["asset_name"])
+        append_line(f"{full_name} installed successfully.")
         root.after(0, lambda: safe_status_config(
-            text=f"Proton-CachyOS {release['release_name']} installed successfully.", fg=COLORS["success"]))
+            text=f"{full_name} installed successfully.", fg=COLORS["success"]))
     except Exception as e:
         err = str(e)
         append_line("")
@@ -882,7 +1162,7 @@ def open_protoncachyos_download_dialog():
     dialog.title("Download Proton-CachyOS")
     dialog.configure(bg=COLORS["primary"])
     dialog.resizable(True, True)
-    dialog.minsize(640, 480)
+    dialog.minsize(900, 480)
 
     frame = ttk.Frame(dialog, padding=15)
     frame.pack(fill=tk.BOTH, expand=True)
@@ -895,11 +1175,16 @@ def open_protoncachyos_download_dialog():
     refresh_btn = ttk.Button(top_bar, text="Refresh", style="Custom.TButton", width=12)
     refresh_btn.pack(side=tk.RIGHT)
 
+    cpu = detect_cpu_profile()
+    ttk.Label(frame, text=f"Your CPU: {cpu['text']}  -  pick a build whose 'Your CPU' column says "
+                          "Recommended or Compatible.", font=FONTS["small"]).pack(anchor="w", pady=(0, 2))
     status_line = ttk.Label(frame, text="Loading releases from GitHub...", font=FONTS["small"])
     status_line.pack(anchor="w", pady=(0, 6))
 
     list_frame = ttk.Frame(frame)
     list_frame.pack(fill=tk.BOTH, expand=True)
+    detail_lbl = ttk.Label(frame, text="", font=FONTS["small"], wraplength=980, justify=tk.LEFT)
+    detail_lbl.pack(anchor="w", pady=(6, 0))
     list_frame.rowconfigure(0, weight=1)
     list_frame.columnconfigure(0, weight=1)
 
@@ -907,7 +1192,7 @@ def open_protoncachyos_download_dialog():
     vscroll.grid(row=0, column=1, sticky="ns")
 
     release_tree = ttk.Treeview(list_frame,
-                                 columns=("Version", "Variant", "Published", "Size", "Status"),
+                                 columns=("Build", "Variant", "Arch", "CPU", "Published", "Size", "Status"),
                                  show="headings",
                                  yscrollcommand=vscroll.set,
                                  selectmode="browse",
@@ -915,16 +1200,13 @@ def open_protoncachyos_download_dialog():
     release_tree.grid(row=0, column=0, sticky="nsew")
     vscroll.config(command=release_tree.yview)
 
-    release_tree.heading("Version", text="Version", anchor="w")
-    release_tree.heading("Variant", text="Variant", anchor="w")
-    release_tree.heading("Published", text="Published", anchor="w")
-    release_tree.heading("Size", text="Size", anchor="w")
-    release_tree.heading("Status", text="Status", anchor="w")
-    release_tree.column("Version", width=200, anchor="w", stretch=True)
-    release_tree.column("Variant", width=90, anchor="w", stretch=False)
-    release_tree.column("Published", width=100, anchor="w", stretch=False)
-    release_tree.column("Size", width=90, anchor="w", stretch=False)
-    release_tree.column("Status", width=90, anchor="w", stretch=False)
+    for col, text, width, stretch in (
+            ("Build", "Build (full name)", 340, True), ("Variant", "Variant", 85, False),
+            ("Arch", "Architecture", 150, False), ("CPU", "Your CPU", 100, False),
+            ("Published", "Published", 90, False), ("Size", "Size", 80, False),
+            ("Status", "Status", 75, False)):
+        release_tree.heading(col, text=text, anchor="w")
+        release_tree.column(col, width=width, anchor="w", stretch=stretch)
 
     releases_data = {}
 
@@ -936,19 +1218,49 @@ def open_protoncachyos_download_dialog():
             return "SLR"
         return "Standalone"
 
+    def cpu_verdict(rel):
+        return proton_arch_compat(proton_asset_arch(rel["asset_name"])[1], cpu)
+
     def populate(releases):
         release_tree.delete(*release_tree.get_children())
         releases_data.clear()
         installed_names = {name for name, _ in find_protoncachyos_installations()}
+        # 'Recommended' = build paling teroptimasi yang masih cocok, per rilis + varian (SLR/Native/...)
+        best = {}
+        for rel in releases:
+            key = proton_asset_arch(rel["asset_name"])[1]
+            if cpu_verdict(rel):
+                grp = (rel["tag"], variant_label(rel["asset_name"]))
+                if grp not in best or proton_arch_rank(key) > best[grp][0]:
+                    best[grp] = (proton_arch_rank(key), rel["asset_name"])
         for rel in releases:
             iid = f"{rel['tag']}::{rel['asset_name']}"
             releases_data[iid] = rel
-            asset_folder_name = _strip_archive_suffix(rel["asset_name"])
-            is_installed = rel["tag"] in installed_names or asset_folder_name in installed_names
+            full_name = _strip_archive_suffix(rel["asset_name"])
+            is_installed = rel["tag"] in installed_names or full_name in installed_names
+            ok = cpu_verdict(rel)
+            grp = (rel["tag"], variant_label(rel["asset_name"]))
+            verdict = ("" if ok is None else "Not compatible" if not ok else
+                       "Recommended" if best.get(grp, (0, ""))[1] == rel["asset_name"] else "Compatible")
             release_tree.insert("", tk.END, iid=iid,
-                                 values=(rel["release_name"], variant_label(rel["asset_name"]),
+                                 values=(full_name, variant_label(rel["asset_name"]),
+                                         proton_asset_arch(rel["asset_name"])[0], verdict,
                                          rel["published_at"], human_size(rel["size"]),
                                          "Installed" if is_installed else ""))
+
+    def on_select(_event=None):
+        sel = release_tree.selection()
+        rel = releases_data.get(sel[0]) if sel else None
+        if not rel:
+            detail_lbl.config(text="")
+            return
+        label = proton_asset_arch(rel["asset_name"])[0]
+        ok = cpu_verdict(rel)
+        note = "" if ok is None else ("  -  compatible with your CPU" if ok else "  -  NOT compatible with your CPU")
+        detail_lbl.config(text=f"File: {rel['asset_name']}\n"
+                               f"Release: {rel['release_name']} ({rel['tag']})    Architecture: {label}{note}")
+
+    release_tree.bind("<<TreeviewSelect>>", on_select)
 
     def load_releases():
         status_line.config(text="Loading releases from GitHub...")
@@ -997,9 +1309,18 @@ def open_protoncachyos_download_dialog():
         rel = get_selected_release()
         if not rel:
             return
+        arch_label, arch_key = proton_asset_arch(rel["asset_name"])
+        if proton_arch_compat(arch_key, cpu) is False and not messagebox.askyesno(
+            "Architecture mismatch",
+            f"'{rel['asset_name']}' targets {arch_label}, which your CPU ({cpu['text']}) "
+            "does not appear to support, so games may fail to start.\n\nDownload it anyway?",
+            icon="warning", parent=dialog
+        ):
+            return
         if not messagebox.askyesno(
             "Download & Install Proton-CachyOS",
-            f"Download and install Proton-CachyOS {rel['release_name']} ({variant_label(rel['asset_name'])})?\n\n"
+            f"Download and install {_strip_archive_suffix(rel['asset_name'])}?\n\n"
+            f"Variant: {variant_label(rel['asset_name'])}    Architecture: {arch_label}\n"
             f"File: {rel['asset_name']}\n"
             f"Size: {human_size(rel['size'])}\n\n"
             f"It will be extracted into:\n{protoncachyos_dir}",
@@ -1007,12 +1328,14 @@ def open_protoncachyos_download_dialog():
         ):
             return
 
+        pause_event = threading.Event()
         append_line, set_progress, win = open_task_log_window(
-            f"Download Proton-CachyOS - {rel['release_name']}", modal_parent=dialog)
+            f"Download {_strip_archive_suffix(rel['asset_name'])}", modal_parent=dialog,
+            pause_event=pause_event)
         append_line(f"Release: {rel['release_name']} ({rel['tag']}) - {rel['asset_name']}")
         append_line("")
-        threading.Thread(target=download_and_install_protoncachyos_worker, args=(rel, append_line, set_progress),
-                          daemon=True).start()
+        threading.Thread(target=download_and_install_protoncachyos_worker,
+                          args=(rel, append_line, set_progress, pause_event, win), daemon=True).start()
 
     def do_open_page():
         webbrowser.open(PROTONCACHYOS_RELEASES_PAGE)
@@ -1023,14 +1346,14 @@ def open_protoncachyos_download_dialog():
                command=do_open_page).grid(row=0, column=1, padx=3)
 
     dialog.update_idletasks()
-    x = root.winfo_rootx() + (root.winfo_width() - 720) // 2
+    x = root.winfo_rootx() + (root.winfo_width() - 1040) // 2
     y = root.winfo_rooty() + (root.winfo_height() - 560) // 2
-    dialog.geometry(f"720x560+{max(x, 0)}+{max(y, 0)}")
+    dialog.geometry(f"1040x600+{max(x, 0)}+{max(y, 0)}")
     dialog.deiconify()
     dialog.transient(root)
     dialog.grab_set()
     dialog.lift()
-    dialog.focus_force()
+    dialog.focus_set()
 
 def generate_next_prefix_code(runner_key):
     """Generate kode prefix baru secara berurutan (GAME001, GAME002, ...) untuk runner_key
@@ -1379,7 +1702,7 @@ def pick_proton_build_dialog(runner_key, parent=None):
               font=FONTS["normal"], justify=tk.LEFT).pack(anchor="w", pady=(0, 10))
 
     names = [name for name, _ in installs]
-    combo = ttk.Combobox(frame, values=names, state="readonly", width=32, font=FONTS["normal"])
+    combo = ttk.Combobox(frame, values=names, state="readonly", width=fit_combo_width(names), font=FONTS["normal"])
     combo.current(0)
     combo.pack(fill=tk.X, pady=(0, 15))
 
@@ -1391,7 +1714,7 @@ def pick_proton_build_dialog(runner_key, parent=None):
         if parent_had_grab and parent.winfo_exists():
             parent.grab_set()
             parent.lift()
-            parent.focus_force()
+            parent.focus_set()
 
     def do_ok():
         result["value"] = installs[combo.current()]
@@ -1412,7 +1735,7 @@ def pick_proton_build_dialog(runner_key, parent=None):
     dialog.transient(parent_win)
     dialog.grab_set()
     dialog.lift()
-    dialog.focus_force()
+    dialog.focus_set()
 
     dialog.wait_window()
     return result["value"]
@@ -1812,7 +2135,6 @@ def open_hud_config_dialog():
         save_hud_config(new_cfg)
         _persist_dialog_position()
         safe_status_config(text="HUD configuration saved.", fg=COLORS["success"])
-        #dialog.destroy()
 
     def do_cancel():
         _persist_dialog_position()
@@ -1860,7 +2182,7 @@ def open_hud_config_dialog():
     dialog.transient(root)
     dialog.grab_set()
     dialog.lift()
-    dialog.focus_force()
+    dialog.focus_set()
 
 def open_winetricks_dialog(entry, parent_dialog=None):
     """GUI untuk memilih verb Winetricks umum lewat checkbox (font, redistributable, dotnet,
@@ -1916,7 +2238,7 @@ def open_winetricks_dialog(entry, parent_dialog=None):
         if parent_had_grab and parent_dialog.winfo_exists():
             parent_dialog.grab_set()
             parent_dialog.lift()
-            parent_dialog.focus_force()
+            parent_dialog.focus_set()
 
     def do_run():
         verbs = [v for v, var in check_vars.items() if var.get()]
@@ -1949,7 +2271,7 @@ def open_winetricks_dialog(entry, parent_dialog=None):
     dialog.transient(parent_win)
     dialog.grab_set()
     dialog.lift()
-    dialog.focus_force()
+    dialog.focus_set()
 
 def human_size(num_bytes):
     """Ubah jumlah byte jadi string yang gampang dibaca (mis. '482.3 MB'), dipakai untuk
@@ -2052,7 +2374,7 @@ def run_with_loading_overlay(parent, title, message, work_fn, on_done):
 
     root.after(100, poll)
 
-def open_task_log_window(title, modal_parent=None, cancel_event=None):
+def open_task_log_window(title, modal_parent=None, cancel_event=None, pause_event=None):
     """Buka jendela log sederhana untuk task Python di background thread (backup/restore) -
     beda dari open_log_window yang khusus untuk proses via pty (game/winetricks).
     Return (append_line, set_progress, win): append_line(text) aman dipanggil dari thread
@@ -2063,6 +2385,11 @@ def open_task_log_window(title, modal_parent=None, cancel_event=None):
     "Cancel" yang, kalau ditekan (dan dikonfirmasi), akan men-set event tersebut - worker
     backup/restore yang berjalan (lihat run_backup_worker/run_restore_worker) mengecek event
     ini secara berkala dan berhenti secepatnya begitu terlihat ter-set.
+
+    pause_event: threading.Event opsional. Kalau diisi, jendela ini menampilkan tombol
+    "Pause"/"Resume" yang men-set/clear event tersebut - worker download Proton
+    (download_url_pausable) menjeda downloadnya selama event ter-set. win.disable_pause()
+    menonaktifkan tombol itu (dipanggil worker begitu download selesai dan masuk tahap ekstrak).
 
     Selama task masih berjalan (lihat win.mark_finished(), dipanggil otomatis oleh
     start_prefix_task_thread() saat worker selesai), tombol window manager/"Close" TIDAK
@@ -2127,12 +2454,33 @@ def open_task_log_window(title, modal_parent=None, cancel_event=None):
             try:
                 modal_parent.grab_set()
                 modal_parent.lift()
-                modal_parent.focus_force()
+                modal_parent.focus_set()
             except tk.TclError:
                 pass
 
     close_row = ttk.Frame(frame)
     close_row.pack(pady=(8, 0))
+
+    pause_btn = None
+    if pause_event is not None:
+        def on_pause_toggle():
+            if task_state["finished"]:
+                return
+            if pause_event.is_set():
+                pause_event.clear()
+                pause_btn.config(text="Pause")
+            else:
+                pause_event.set()
+                pause_btn.config(text="Resume")
+
+        pause_btn = ttk.Button(close_row, text="Pause", command=on_pause_toggle,
+                                style="Custom.TButton", width=12)
+        pause_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+    def disable_pause():
+        if pause_btn is not None and pause_btn.winfo_exists():
+            pause_event.clear()
+            pause_btn.config(state="disabled", text="Pause")
 
     cancel_btn = None
     if cancel_event is not None:
@@ -2164,8 +2512,10 @@ def open_task_log_window(title, modal_parent=None, cancel_event=None):
         task_state["finished"] = True
         if cancel_btn is not None and cancel_btn.winfo_exists():
             cancel_btn.config(state="disabled")
+        disable_pause()
 
     win.mark_finished = mark_finished
+    win.disable_pause = disable_pause
 
     line_queue = queue.Queue()
     latest_progress = {"value": None}
@@ -2835,7 +3185,7 @@ def open_restore_backup_dialog(parent_dialog=None):
             if reacquire_parent_grab and parent_had_grab and parent_dialog.winfo_exists():
                 parent_dialog.grab_set()
                 parent_dialog.lift()
-                parent_dialog.focus_force()
+                parent_dialog.focus_set()
 
         def do_restore():
             if prefix_task_is_busy():
@@ -2935,7 +3285,7 @@ def open_restore_backup_dialog(parent_dialog=None):
         dialog.transient(parent_win)
         dialog.grab_set()
         dialog.lift()
-        dialog.focus_force()
+        dialog.focus_set()
 
 RUNNER_DISPLAY_NAMES = {"wine": "Wine", "protonge": "Proton GE", "protoncachyos": "Proton-CachyOS"}
 
@@ -3202,7 +3552,7 @@ def open_prefix_manager_dialog():
             return
         win.deiconify()
         win.lift()
-        win.focus_force()
+        win.focus_set()
 
     show_logs_btn.config(command=do_show_logs)
 
@@ -3484,12 +3834,15 @@ def build_script_content(folder_path, exe_path, choice):
         lines.append(f'wine "{exe_path}"{extra_args_str}')
     return "\n".join(lines) + "\n"
 
-def ask_runner_choice(parent_script_name=None, purpose="play"):
+def ask_runner_choice(parent_script_name=None, purpose="play", parent=None, game_title=None):
     """
     Tampilkan dialog pilihan runner: Wine (Vanilla) atau Proton GE.
     - parent_script_name: nama game (untuk konteks PLAY), dipakai untuk mengingat pilihan sebelumnya
       dan menjaga prefix ProtonGE tetap konsisten untuk game yang sama.
     - purpose: "play" atau "setup", hanya memengaruhi teks judul dialog.
+    - parent: window induk dialog ini (mis. jendela GOG Store) supaya dialog muncul DI ATASNYA;
+      kosong = jendela utama launcher.
+    - game_title: nama game yang ditampilkan di dialog (opsional).
 
     Return dict pilihan, atau None jika dibatalkan.
     """
@@ -3500,7 +3853,8 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
     if parent_script_name:
         existing_cfg = load_runner_config().get(parent_script_name)
 
-    dialog = tk.Toplevel(root)
+    parent_win = parent if (parent is not None and parent.winfo_exists()) else root
+    dialog = tk.Toplevel(parent_win)
     dialog.withdraw()
     dialog.title("Select Runner - Setup" if purpose == "setup" else "Select Runner - Play")
     dialog.configure(bg=COLORS["primary"])
@@ -3511,8 +3865,8 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
     frame = ttk.Frame(dialog, padding=15)
     frame.pack(fill=tk.BOTH, expand=True)
 
-    ttk.Label(frame, text="Select Runner - Game:",
-              font=FONTS["normal"]).pack(anchor="w", pady=(0, 10))
+    ttk.Label(frame, text=f"Select Runner - {game_title}:" if game_title else "Select Runner - Game:",
+              font=FONTS["normal"], wraplength=420, justify=tk.LEFT).pack(anchor="w", pady=(0, 10))
 
     existing_runner = existing_cfg.get("runner") if existing_cfg else None
     default_runner = existing_runner if existing_runner in ("protonge", "protoncachyos") else "wine"
@@ -3559,16 +3913,23 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
         btn_row.pack(anchor="w", pady=(0, 8))
 
         move_btn = ttk.Button(btn_row, text="Move Prefix...", style="Custom.TButton")
+        saves_btn_inline = ttk.Button(btn_row, text="Saves...", style="Custom.TButton")
         browse_btn = ttk.Button(btn_row, text="Browse Other Folder/Disk...", style="Custom.TButton")
         default_btn = ttk.Button(btn_row, text="Use Default (WLM Folder)", style="Custom.TButton")
 
+        # Saves hanya masuk akal kalau game-nya sudah pernah di-launch (prefix sudah ada) dan
+        # kita tahu game mana yang dimaksud (purpose == "play", bukan dialog Setup/Install).
+        show_saves_btn = purpose == "play" and bool(parent_script_name)
+
         def refresh():
-            for w in (move_btn, browse_btn, default_btn):
+            for w in (move_btn, saves_btn_inline, browse_btn, default_btn):
                 w.pack_forget()
             if state["existing_path"] is not None:
                 info_var.set(f"Prefix: {state['existing_code']} (used previously, kept consistent)\n"
                               f"Location: {state['existing_path']}")
                 move_btn.pack(side=tk.LEFT)
+                if show_saves_btn:
+                    saves_btn_inline.pack(side=tk.LEFT, padx=(5, 0))
             else:
                 info_var.set(f"A new prefix will be created automatically at:\n{state['new_base_dir']} (e.g. GAMEXXX)")
                 browse_btn.pack(side=tk.LEFT, padx=(0, 5))
@@ -3603,7 +3964,11 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
             reset_prefix_base_dir(runner_key)
             refresh()
 
+        def do_saves():
+            open_save_manager(script_name=parent_script_name, parent_win=dialog)
+
         move_btn.config(command=do_move)
+        saves_btn_inline.config(command=do_saves)
         browse_btn.config(command=do_browse)
         default_btn.config(command=do_default)
 
@@ -3620,16 +3985,24 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
     )
     wine_prefix_panel, wine_prefix_state = build_prefix_panel(runner_dynamic_frame, "wine", "Wine")
 
+    def refit_dialog():
+        """Isi dialog berubah tinggi (panel Wine/Proton berganti) -> tengahkan lagi supaya
+        bagian bawahnya (tombol OK) tidak masuk ke bawah taskbar."""
+        if dialog.winfo_exists() and dialog.winfo_viewable():
+            dialog.after_idle(lambda: place_dialog(dialog, parent_win))
+
     def toggle_wine_panel(*_):
         if wine_use_prefix_var.get():
             wine_prefix_panel.pack(anchor="w", pady=(2, 8), fill=tk.X)
         else:
             wine_prefix_panel.pack_forget()
+        refit_dialog()
 
     wine_use_prefix_var.trace_add("write", toggle_wine_panel)
 
     protonge_version_label = ttk.Label(runner_dynamic_frame, text="Proton GE Version:", font=FONTS["small"])
-    protonge_version_combo = ttk.Combobox(runner_dynamic_frame, state="readonly", width=32, font=FONTS["small"])
+    protonge_version_combo = ttk.Combobox(runner_dynamic_frame, state="readonly",
+                                           width=fit_combo_width([n for n, _ in protonge_list]), font=FONTS["small"])
 
     if protonge_list:
         protonge_version_combo["values"] = [name for name, _ in protonge_list]
@@ -3645,7 +4018,8 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
     protonge_prefix_panel, protonge_prefix_state = build_prefix_panel(runner_dynamic_frame, "protonge", "Proton GE")
 
     cachyos_version_label = ttk.Label(runner_dynamic_frame, text="Proton-CachyOS Version:", font=FONTS["small"])
-    cachyos_version_combo = ttk.Combobox(runner_dynamic_frame, state="readonly", width=32, font=FONTS["small"])
+    cachyos_version_combo = ttk.Combobox(runner_dynamic_frame, state="readonly",
+                                          width=fit_combo_width([n for n, _ in protoncachyos_list]), font=FONTS["small"])
 
     if protoncachyos_list:
         cachyos_version_combo["values"] = [name for name, _ in protoncachyos_list]
@@ -3683,6 +4057,7 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
             cachyos_version_label.pack(anchor="w", pady=(10, 2))
             cachyos_version_combo.pack(anchor="w", pady=(0, 2))
             cachyos_prefix_panel.pack(anchor="w", pady=(2, 6), fill=tk.X)
+        refit_dialog()
 
     runner_var.trace_add("write", toggle_runner_widgets)
     toggle_runner_widgets()
@@ -3782,40 +4157,38 @@ def ask_runner_choice(parent_script_name=None, purpose="play"):
     ttk.Button(btn_frame, text="Cancel", command=on_cancel, style="Custom.TButton", width=12).pack(side=tk.LEFT)
     ttk.Button(btn_frame, text="OK", command=on_ok, style="Custom.TButton", width=12).pack(side=tk.RIGHT)
 
-    dialog.update_idletasks()
-    w, h = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
-    x = root.winfo_x() + (root.winfo_width() // 2) - (w // 2)
-    y = root.winfo_y() + (root.winfo_height() // 2) - (h // 2)
-    x, y = max(x, 0), max(y, 0)
-    dialog.geometry(f"+{x}+{y}")
+    place_dialog(dialog, parent_win)
     dialog.deiconify()
-    dialog.transient(root)
+    dialog.transient(parent_win)
     dialog.grab_set()
     dialog.lift()
-    dialog.focus_force()
+    dialog.focus_set()
 
-    dialog.after(30, lambda: dialog.geometry(f"+{x}+{y}"))
+    # Window manager sering menggeser dialog saat ditampilkan -> tengahkan lagi sebentar kemudian.
+    for delay in (30, 150, 400):
+        dialog.after(delay, lambda: place_dialog(dialog, parent_win))
 
     dialog.wait_window()
     return result["value"]
 
-def apply_theme(theme_name):
+def apply_theme(theme_name, announce=True):
     """Apply the theme to all widgets"""
     global CURRENT_THEME, COLORS
     if theme_name not in THEMES:
         theme_name = "default"
-    
+
     CURRENT_THEME = theme_name
     COLORS = THEMES[theme_name]
-    
+
     save_theme_config(theme_name)
-    
+
     update_style_config()
-    
+
     update_widget_colors()
-    
-    safe_status_config(text=f"Changed to {COLORS['name']} theme", fg=COLORS["success"])
-    
+
+    if announce:
+        safe_status_config(text=f"Changed to {COLORS['name']} theme", fg=COLORS["success"])
+
     theme_combo.set(COLORS["name"])
 
 def save_theme_config(theme_name):
@@ -3823,165 +4196,520 @@ def save_theme_config(theme_name):
     with open(theme_config_file, 'w') as f:
         json.dump({'theme': theme_name}, f)
 
+def mix_color(c1, c2, t):
+    """Campur dua warna hex '#rrggbb': t=0 -> c1, t=1 -> c2 (dipakai untuk warna disabled/pressed)."""
+    try:
+        if len(c1) != 7 or len(c2) != 7:
+            return c1
+        a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+        b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    except (ValueError, TypeError):
+        return c1
+    return "#%02x%02x%02x" % tuple(round(x + (y - x) * t) for x, y in zip(a, b))
+
+def readable_on(bg_color, dark="#0b0d14", light="#ffffff"):
+    """Pilih teks gelap/terang yang kontrasnya paling nyaman di atas warna latar tertentu."""
+    try:
+        r, g, b = (int(bg_color[i:i + 2], 16) for i in (1, 3, 5))
+    except (ValueError, TypeError, IndexError):
+        return light
+    return dark if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else light
+
+_RB = {"n": 0, "keep": []}
+
+def _rounded_img(fill, border, parent, radius, inset, lip=0, pressed=False):
+    """Gambar 9-patch tombol rounded (anti-alias lewat supersampling). Sudut diisi warna parent
+    supaya menyatu dengan latar. 'lip' = tepi bawah gelap (tombol terasa timbul); 'pressed' =
+    bayangan di tepi atas (tombol terasa masuk)."""
+    k = 4
+    size = 2 * (inset + radius) + 2
+    big = size * k
+
+    def mask(off, rad):
+        m = Image.new("L", (big, big), 0)
+        ImageDraw.Draw(m).rounded_rectangle(
+            [off * k, off * k, big - 1 - off * k, big - 1 - off * k],
+            radius=max(rad, 0) * k, fill=255)
+        return m
+
+    outer, inner = mask(inset, radius), mask(inset + 1, radius - 1)
+    canvas = Image.new("RGB", (big, big), parent)
+    canvas.paste(border, mask=outer)
+    canvas.paste(fill, mask=inner)
+    shade = mix_color(fill, "#000000", 0.28)
+    if pressed:
+        canvas.paste(shade, mask=ImageChops.subtract(inner, ImageChops.offset(inner, 0, 2 * k)))
+    elif lip:
+        canvas.paste(shade, mask=ImageChops.subtract(inner, ImageChops.offset(inner, 0, -lip * k)))
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    photo = ImageTk.PhotoImage(canvas.resize((size, size), resample))
+    _RB["keep"].append(photo)
+    return photo
+
+def round_style(name, specs, parent, radius=8, inset=0, lip=2):
+    """Ganti layout ttk style 'name' dengan tombol rounded.
+    specs: [(statetuple|None, fill, border, pressed)] - entri pertama (None) = keadaan normal."""
+    _RB["n"] += 1
+    elem = f"RoundBtnBg{_RB['n']}"
+    default, extra = None, []
+    for states, fill, brd, pressed in specs:
+        img = _rounded_img(fill, brd, parent, radius, inset, 0 if pressed else lip, pressed)
+        if states is None:
+            default = img
+        else:
+            extra.append((*states, img))
+    b = inset + radius
+    style.element_create(elem, "image", default, *extra, border=(b, b, b, b),
+                         padding=(inset + 1, inset + 1, inset + 1, inset + 1 + lip), sticky="nsew")
+    style.layout(name, [(elem, {"sticky": "nswe", "children": [
+        ("Button.padding", {"sticky": "nswe", "children": [
+            ("Button.label", {"sticky": "nswe"})]})]})])
+
+def round_entry(name, fill, border, focus_border, disabled_fill, parent, radius=10):
+    """Ganti layout ttk.Entry style 'name' dengan kolom input rounded (garis tepi berubah saat fokus)."""
+    _RB["n"] += 1
+    elem = f"RoundEntryBg{_RB['n']}"
+    normal = _rounded_img(fill, border, parent, radius, 0)
+    focus = _rounded_img(fill, focus_border, parent, radius, 0)
+    off = _rounded_img(disabled_fill, border, parent, radius, 0)
+    style.element_create(elem, "image", normal, ("disabled", off), ("readonly", off), ("focus", focus),
+                         border=(radius, radius, radius, radius), padding=(1, 1, 1, 1), sticky="nsew")
+    style.layout(name, [(elem, {"sticky": "nswe", "children": [
+        ("Entry.padding", {"sticky": "nswe", "children": [
+            ("Entry.textarea", {"sticky": "nswe"})]})]})])
+
 def update_style_config():
-    """Update ttk style configuration"""
-    style.configure("TFrame", background=COLORS["primary"])
-    style.configure("TPanedwindow", background=COLORS["primary"])
-    
-    style.configure("TLabel", 
-                    background=COLORS["primary"], 
-                    foreground=COLORS["text"],
-                    font=FONTS["normal"])
-    
-    style.configure("Custom.TButton",
-                    background=COLORS["button_bg"],
-                    foreground=COLORS["button_fg"],
-                    bordercolor=COLORS["border"],
-                    borderwidth=1,
-                    focusthickness=1,
-                    focuscolor=COLORS["highlight"],
-                    font=FONTS["normal"],
-                    padding=6)
-    
-    style.map("Custom.TButton",
-              background=[("active", COLORS["highlight"]), ("!active", COLORS["button_bg"])],
-              foreground=[("active", COLORS["button_text"]), ("!active", COLORS["button_fg"])])
+    """Update ttk style configuration - tampilan flat modern: tombol datar dengan hover halus,
+    tombol utama (Play/Accent), tombol bahaya (Remove), scrollbar tipis, tabel tanpa border."""
+    C = COLORS
+    bg, surface, card, border = C["primary"], C["secondary"], C["card_bg"], C["border"]
+    hl, on_hl = C["highlight"], C["button_text"]
+    text, muted = C["text"], C["text_secondary"]
+    field = C["text_background"]
+    white, black = "#ffffff", "#000000"
+
+    def flat_button(name, bg_, fg_, hover_bg, press_bg, hover_fg=None, border_=None,
+                    hover_border=None, font=None, padding=(14, 8), radius=8, lip=2, parent=None):
+        border_ = border_ or bg_
+        hover_border = hover_border or hover_bg
+        dis_bg = mix_color(bg_, bg, 0.6)
+        dis_fg = mix_color(fg_, bg, 0.55)
+        style.configure(name, background=bg_, foreground=fg_, bordercolor=border_,
+                        lightcolor=bg_, darkcolor=bg_, borderwidth=1, relief="flat",
+                        focusthickness=1, focuscolor=hl, font=font or FONTS["normal"],
+                        padding=padding, anchor="center", shiftrelief=1)
+        # Urutan penting (yang cocok pertama menang): disabled -> pressed -> active -> normal.
+        style.map(name,
+                  background=[("disabled", dis_bg), ("pressed", press_bg), ("active", hover_bg)],
+                  foreground=[("disabled", dis_fg), ("active", hover_fg or fg_)],
+                  bordercolor=[("disabled", dis_bg), ("pressed", press_bg), ("active", hover_border)],
+                  lightcolor=[("disabled", dis_bg), ("pressed", press_bg), ("active", hover_bg)],
+                  darkcolor=[("disabled", dis_bg), ("pressed", press_bg), ("active", hover_bg)],
+                  relief=[("pressed", "sunken"), ("!pressed", "flat")])
+        try:
+            round_style(name, [
+                (None, bg_, border_, False),
+                (("disabled",), dis_bg, dis_bg, False),
+                (("pressed",), press_bg, mix_color(press_bg, black, 0.2), True),
+                (("active",), hover_bg, hover_border, False),
+                (("focus",), bg_, hl, False),
+            ], parent or bg, radius=radius, lip=lip)
+        except Exception as e:
+            print(f"[WLM] rounded button {name}: {e}")
+
+    style.configure("TFrame", background=bg)
+    style.configure("Header.TFrame", background=surface)
+    style.configure("Footer.TFrame", background=surface)
+    style.configure("Side.TFrame", background=surface)
+    style.configure("Card.TFrame", background=card)
+    style.configure("TPanedwindow", background=bg)
+
+    style.configure("TLabel", background=bg, foreground=text, font=FONTS["normal"])
+    style.configure("Muted.TLabel", foreground=muted)
+    style.configure("Heading.TLabel", font=FONTS["heading"])
+    style.configure("Card.TLabel", background=card, foreground=text, font=FONTS["normal"])
+    style.configure("CardMuted.TLabel", background=card, foreground=muted, font=FONTS["small"])
+    style.configure("FooterMuted.TLabel", background=surface, foreground=muted, font=FONTS["small"])
+
+    btn_bg, btn_fg = C["button_bg"], C["button_fg"]
+    flat_button("Custom.TButton", btn_bg, btn_fg, mix_color(btn_bg, hl, 0.32),
+                mix_color(btn_bg, hl, 0.55), border_=border, hover_border=hl, padding=(12, 7))
+    flat_button("TButton", btn_bg, btn_fg, mix_color(btn_bg, hl, 0.32),
+                mix_color(btn_bg, hl, 0.55), border_=border, hover_border=hl, padding=(12, 7))
+    flat_button("Action.TButton", btn_bg, btn_fg, mix_color(btn_bg, hl, 0.32),
+                mix_color(btn_bg, hl, 0.55), border_=border, hover_border=hl, padding=(6, 7))
+    flat_button("Accent.TButton", hl, on_hl, mix_color(hl, white, 0.14), mix_color(hl, black, 0.22),
+                font=(FONT_FAMILY, 9, "bold"), padding=(14, 7))
+    play_bg = C["success"]
+    flat_button("Play.TButton", play_bg, readable_on(play_bg), mix_color(play_bg, white, 0.12),
+                mix_color(play_bg, black, 0.22), font=(FONT_FAMILY, 12, "bold"), padding=(12, 11))
+    danger = C["danger"]
+    flat_button("Danger.TButton", btn_bg, danger, danger, mix_color(danger, black, 0.25),
+                hover_fg=readable_on(danger), border_=border, hover_border=danger, padding=(6, 7))
+    flat_button("SegOn.TButton", hl, on_hl, mix_color(hl, white, 0.10), mix_color(hl, black, 0.22),
+                padding=(14, 6), lip=0)
+    flat_button("SegOff.TButton", card, muted, mix_color(card, hl, 0.25), mix_color(card, hl, 0.45),
+                hover_fg=text, border_=border, padding=(14, 6), lip=0)
+    # Tombol hamburger (header) - datar menyatu dengan header. Nama lama dipertahankan.
+    flat_button("Hamburger.Custom.TButton", surface, text, mix_color(surface, hl, 0.25),
+                mix_color(surface, hl, 0.45), font=(FONT_FAMILY, 14), padding=(8, 2),
+                lip=0, parent=surface)
+
+    side_hover = mix_color(surface, hl, 0.22)
+    style.configure("SideTitle.TLabel", background=surface, foreground=text, font=FONTS["title"])
+    style.configure("SideSection.TLabel", background=surface, foreground=hl,
+                    font=(FONT_FAMILY, 8, "bold"))
+    style.configure("SideMuted.TLabel", background=surface, foreground=muted, font=FONTS["small"])
+    style.configure("Side.TSeparator", background=border)
+    style.configure("Sidebar.TButton",
+                    background=surface, foreground=text, bordercolor=surface, lightcolor=surface,
+                    darkcolor=surface, borderwidth=0, focusthickness=0, focuscolor=surface,
+                    font=FONTS["normal"], padding=(18, 9), anchor="w", relief="flat")
+    style.map("Sidebar.TButton",
+              background=[("pressed", hl), ("active", side_hover), ("!active", surface)],
+              foreground=[("pressed", on_hl), ("active", text), ("!active", text)],
+              bordercolor=[("pressed", hl), ("active", side_hover)],
+              lightcolor=[("pressed", hl), ("active", side_hover)],
+              darkcolor=[("pressed", hl), ("active", side_hover)],
+              relief=[("pressed", "flat"), ("!pressed", "flat")])
+    try:
+        round_style("Sidebar.TButton", [
+            (None, surface, surface, False),
+            (("pressed",), hl, hl, True),
+            (("active",), side_hover, side_hover, False),
+        ], surface, radius=8, inset=4, lip=0)
+    except Exception as e:
+        print(f"[WLM] rounded sidebar button: {e}")
 
     style.layout("Runner.TRadiobutton", style.layout("TButton"))
     style.configure("Runner.TRadiobutton",
-                    background=COLORS["button_bg"],
-                    foreground=COLORS["button_fg"],
-                    bordercolor=COLORS["border"],
+                    background=C["button_bg"],
+                    foreground=C["button_fg"],
+                    bordercolor=C["border"],
                     borderwidth=1,
                     focusthickness=1,
-                    focuscolor=COLORS["highlight"],
+                    focuscolor=C["highlight"],
                     font=FONTS["normal"],
                     anchor="center",
                     padding=6)
     style.map("Runner.TRadiobutton",
-              background=[("disabled", COLORS["card_bg"]),
-                          ("selected", COLORS["highlight"]),
-                          ("active", COLORS["highlight"]),
-                          ("!selected", COLORS["button_bg"])],
-              foreground=[("disabled", COLORS["text_secondary"]),
-                          ("selected", COLORS["button_text"]),
-                          ("active", COLORS["button_text"]),
-                          ("!selected", COLORS["button_fg"])])
-
-    style.configure("Custom.TCheckbutton",
-                    background=COLORS["primary"],
-                    foreground=COLORS["text"],
-                    font=FONTS["normal"],
-                    indicatorbackground=COLORS["text_background"],
-                    indicatorforeground=COLORS["button_text"],
-                    indicatormargin=(0, 0, 6, 0),
-                    focuscolor=COLORS["highlight"])
-    style.map("Custom.TCheckbutton",
-              background=[("active", COLORS["primary"])],
-              foreground=[("disabled", COLORS["text_secondary"]),
-                          ("active", COLORS["text"])],
-              indicatorbackground=[("disabled", COLORS["card_bg"]),
-                                    ("selected", COLORS["highlight"]),
-                                    ("!selected", COLORS["text_background"])],
-              indicatorforeground=[("disabled", COLORS["text_secondary"]),
-                                    ("selected", COLORS["button_text"])])
-    
-    style.configure("TCombobox",
-                    fieldbackground=COLORS["text_background"],
-                    background=COLORS["card_bg"],
-                    foreground=COLORS["text"],
-                    selectbackground=COLORS["highlight"],
-                    selectforeground=COLORS["text"],
-                    bordercolor=COLORS["border"],
-                    relief="flat",
-                    borderwidth=1)
-    style.map("TCombobox",
-              fieldbackground=[("readonly", COLORS["text_background"])],
-              selectbackground=[("readonly", COLORS["highlight"])],
-              selectforeground=[("readonly", COLORS["text_background"])],
-              background=[("readonly", COLORS["card_bg"])],
-              foreground=[("readonly", COLORS["text"])])
-    
-    style.configure("TScrollbar",
-                    background=COLORS["secondary"],
-                    troughcolor=COLORS["primary"],
-                    bordercolor=COLORS["primary"],
-                    arrowcolor=COLORS["text"])
-    style.map("TScrollbar",
-              background=[("active", COLORS["highlight"])])
-
-    style.configure("TProgressbar",
-                    background=COLORS["highlight"],
-                    troughcolor=COLORS["card_bg"],
-                    bordercolor=COLORS["border"],
-                    lightcolor=COLORS["highlight"],
-                    darkcolor=COLORS["highlight"])
-
-    style.configure("Treeview",
-                    background=COLORS["tree_bg"],
-                    foreground=COLORS["tree_fg"],
-                    fieldbackground=COLORS["tree_bg"],
-                    bordercolor=COLORS["border"],
-                    borderwidth=0,
-                    rowheight=25)
-    
-    style.configure("Treeview.Heading",
-                    background=COLORS["secondary"],
-                    foreground=COLORS["highlight"],
-                    relief="raised",
-                    font=FONTS["subtitle"],
-                    padding=6,
-                    bordercolor=COLORS["border"])
-    
-    style.map("Treeview", 
-              background=[("selected", COLORS["tree_highlight"])],
-              foreground=[("selected", COLORS["tree_highlight_text"])])
-
-def update_widget_colors():
-    """Update colors of all tk widgets and force refresh of ttk styles"""
+              background=[("disabled", C["card_bg"]),
+                          ("selected", C["highlight"]),
+                          ("active", C["highlight"]),
+                          ("!selected", C["button_bg"])],
+              foreground=[("disabled", C["text_secondary"]),
+                          ("selected", C["button_text"]),
+                          ("active", C["button_text"]),
+                          ("!selected", C["button_fg"])])
     try:
-        root.configure(bg=COLORS["primary"])
-        
-        title_label.config(bg=COLORS["primary"], fg=COLORS["text"])
-        safe_status_config(bg=COLORS["primary"], fg=COLORS["text_secondary"])
-        game_title_label.config(bg=COLORS["primary"], fg=COLORS["text"])
-        info_label.config(bg=COLORS["primary"], fg=COLORS["text_secondary"])
-        icon_label.config(bg=COLORS["card_bg"]) 
-        
-        settings_menu.config(bg=COLORS["card_bg"], fg=COLORS["text"], 
-                             activebackground=COLORS["highlight"], 
-                             activeforeground=COLORS["button_text"])
-        
-        for btn in all_buttons:
-            btn.configure(style="Custom.TButton")
-        
-        theme_combo.configure(style="TCombobox")
-        sort_combo.configure(style="TCombobox")
-        launch_mode_combo.configure(style="TCombobox")
-        tree.configure(style="Treeview")
-            
+        round_style("Runner.TRadiobutton", [
+            (None, C["button_bg"], C["border"], False),
+            (("disabled",), C["card_bg"], C["card_bg"], False),
+            (("selected",), hl, hl, False),
+            (("active",), hl, hl, False),
+        ], bg, radius=8, lip=2)
     except Exception as e:
+        print(f"[WLM] rounded runner button: {e}")
+
+    for base_name in ("TCheckbutton", "TRadiobutton"):
+        style.configure(base_name, background=bg, foreground=text, font=FONTS["normal"],
+                        focuscolor=hl)
+        style.map(base_name, background=[("active", bg)], foreground=[("disabled", muted)])
+    style.configure("Custom.TCheckbutton",
+                    background=bg,
+                    foreground=text,
+                    font=FONTS["normal"],
+                    indicatorbackground=field,
+                    indicatorforeground=on_hl,
+                    indicatormargin=(0, 0, 6, 0),
+                    focuscolor=hl)
+    style.map("Custom.TCheckbutton",
+              background=[("active", bg)],
+              foreground=[("disabled", muted), ("active", text)],
+              indicatorbackground=[("disabled", card), ("selected", hl), ("!selected", field)],
+              indicatorforeground=[("disabled", muted), ("selected", on_hl)])
+
+    # ---- input: entry & combobox (fokus = garis highlight)
+    style.configure("TEntry", fieldbackground=field, foreground=text, insertcolor=text,
+                    bordercolor=border, lightcolor=border, darkcolor=border, borderwidth=1,
+                    padding=4, selectbackground=hl, selectforeground=on_hl)
+    style.map("TEntry",
+              bordercolor=[("focus", hl)], lightcolor=[("focus", hl)], darkcolor=[("focus", hl)],
+              fieldbackground=[("readonly", mix_color(field, bg, 0.5)),
+                               ("disabled", mix_color(field, bg, 0.5))],
+              foreground=[("disabled", muted)])
+    style.configure("Search.TEntry", padding=(12, 7))
+    try:
+        round_entry("Search.TEntry", field, border, hl, mix_color(field, bg, 0.5), bg, radius=10)
+    except Exception as e:
+        print(f"[WLM] rounded search entry: {e}")
+
+    style.configure("TCombobox",
+                    fieldbackground=field, background=card, foreground=text,
+                    arrowcolor=muted, arrowsize=14,
+                    selectbackground=field, selectforeground=text,
+                    bordercolor=border, lightcolor=border, darkcolor=border,
+                    relief="flat", borderwidth=1, padding=4)
+    style.map("TCombobox",
+              fieldbackground=[("readonly", field)],
+              background=[("readonly", card)],
+              foreground=[("readonly", text)],
+              selectbackground=[("readonly", field)],
+              selectforeground=[("readonly", text)],
+              bordercolor=[("focus", hl), ("active", hl)],
+              lightcolor=[("focus", hl), ("active", hl)],
+              darkcolor=[("focus", hl), ("active", hl)],
+              arrowcolor=[("active", hl), ("focus", hl)])
+    # Daftar dropdown combobox (Listbox Tk biasa) ikut warna tema.
+    try:
+        root.option_add("*TCombobox*Listbox.background", field)
+        root.option_add("*TCombobox*Listbox.foreground", text)
+        root.option_add("*TCombobox*Listbox.selectBackground", hl)
+        root.option_add("*TCombobox*Listbox.selectForeground", on_hl)
+        root.option_add("*TCombobox*Listbox.borderWidth", 0)
+        root.option_add("*TCombobox*Listbox.highlightThickness", 0)
+    except tk.TclError:
         pass
 
-def update_script_list(sort_order="ascending"):
-    """Update script list with sorting"""
+    # ---- scrollbar tipis tanpa tombol panah
+    thumb = mix_color(bg, text, 0.22)
+    style.layout("Vertical.TScrollbar",
+                 [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+                     ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
+    style.layout("Horizontal.TScrollbar",
+                 [("Horizontal.Scrollbar.trough", {"sticky": "ew", "children": [
+                     ("Horizontal.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
+    style.configure("TScrollbar", background=thumb, troughcolor=bg, bordercolor=bg,
+                    lightcolor=thumb, darkcolor=thumb, arrowcolor=muted, gripcount=0, width=10,
+                    relief="flat", borderwidth=0)
+    style.map("TScrollbar",
+              background=[("pressed", hl), ("active", mix_color(thumb, hl, 0.6))],
+              lightcolor=[("pressed", hl), ("active", mix_color(thumb, hl, 0.6))],
+              darkcolor=[("pressed", hl), ("active", mix_color(thumb, hl, 0.6))])
+
+    style.configure("TProgressbar", background=hl, troughcolor=card, bordercolor=card,
+                    lightcolor=hl, darkcolor=hl, thickness=10)
+
+    # ---- tabel (Treeview): tanpa border, baris lega, header datar
+    style.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+    style.configure("Treeview",
+                    background=C["tree_bg"], foreground=C["tree_fg"], fieldbackground=C["tree_bg"],
+                    bordercolor=C["tree_bg"], borderwidth=0, relief="flat", rowheight=32,
+                    font=FONTS["body"])
+    style.configure("Treeview.Heading",
+                    background=surface, foreground=muted, relief="flat", borderwidth=0,
+                    bordercolor=surface, lightcolor=surface, darkcolor=surface,
+                    font=(FONT_FAMILY, 9, "bold"), padding=(8, 8))
+    style.map("Treeview.Heading",
+              background=[("active", card)], foreground=[("active", text)])
+    style.map("Treeview",
+              background=[("selected", C["tree_highlight"])],
+              foreground=[("selected", C["tree_highlight_text"])])
+
+    style.configure("TSeparator", background=border)
+
+    # LabelFrame (mis. kotak "Save folders"/"Local backups"/"GOG cloud saves" di Save Manager) -
+    # tanpa ini ttk.LabelFrame memakai tampilan default tema 'clam' (kotak abu-abu terang) yang
+    # tidak nyambung sama sekali dengan tema gelap/custom aplikasi.
+    style.configure("TLabelframe",
+                    background=bg,
+                    bordercolor=border,
+                    darkcolor=border,
+                    lightcolor=border,
+                    relief="solid",
+                    borderwidth=1)
+    style.configure("TLabelframe.Label",
+                    background=bg,
+                    foreground=hl,
+                    font=FONTS["subtitle"])
+
+def _style_combo_popdown(combo):
+    """Daftar dropdown yang SUDAH pernah dibuat tidak ikut option_add -> warnai langsung."""
+    try:
+        popdown = root.tk.call("ttk::combobox::PopdownWindow", str(combo))
+        root.tk.call(f"{popdown}.f.l", "configure",
+                     "-background", COLORS["text_background"], "-foreground", COLORS["text"],
+                     "-selectbackground", COLORS["highlight"],
+                     "-selectforeground", COLORS["button_text"],
+                     "-borderwidth", 0, "-highlightthickness", 0)
+    except tk.TclError:
+        pass
+
+def update_widget_colors():
+    """Update colors of all tk widgets (yang tidak ikut ttk style) + segarkan style tombol"""
+    C = COLORS
+    try:
+        root.configure(bg=C["primary"])
+    except tk.TclError:
+        return
+
+    def cfg(widget_name, **kwargs):
+        widget = globals().get(widget_name)
+        if widget is None:
+            return
+        try:
+            widget.configure(**kwargs)
+        except tk.TclError:
+            pass
+
+    cfg("title_label", bg=C["secondary"], fg=C["text"])
+    cfg("version_label", bg=C["secondary"], fg=C["text_secondary"])
+    cfg("header_line", bg=C["border"])
+    safe_status_config(bg=C["secondary"], fg=C["text_secondary"])
+    cfg("detail_card", bg=C["card_bg"], highlightbackground=C["border"],
+        highlightcolor=C["border"])
+    cfg("game_title_label", bg=C["card_bg"], fg=C["text"])
+    cfg("info_label", bg=C["card_bg"], fg=C["text_secondary"])
+    cfg("icon_label", bg=C["card_bg"], fg=C["text_secondary"])
+    cfg("tree_frame", bg=C["tree_bg"], highlightbackground=C["border"],
+        highlightcolor=C["border"])
+    cfg("empty_label", fg=C["text_secondary"])
+    _sync = globals().get("_sync_empty_bg")
+    if _sync:
+        _sync()
+    cfg("search_hint", bg=C["text_background"], fg=C["text_secondary"])
+    cfg("side_canvas", bg=C["secondary"])
+
+    for btn in all_buttons:
+        try:
+            btn.configure(style=_BUTTON_STYLES.get(btn, "Custom.TButton"))
+        except tk.TclError:
+            pass
+
+    for combo_name in ("theme_combo", "sort_combo", "launch_mode_combo", "size_combo"):
+        combo = globals().get(combo_name)
+        if combo is not None:
+            try:
+                combo.configure(style="TCombobox")
+            except tk.TclError:
+                continue
+            _style_combo_popdown(combo)
+
+    try:
+        tree.configure(style="Treeview")
+    except tk.TclError:
+        pass
+    if library_grid is not None:
+        try:
+            library_grid.recolor()
+        except Exception as e:
+            print(f"[WLM] Could not recolor the cover grid: {e}")
+
+_GOG_STOP_DIRS = {"drive_c", "gog games", "games", "gog.com", "program files", "program files (x86)"}
+_source_cache = {}
+
+def _detect_gog_id(exe_path):
+    """id GOG dari goggame-<id>.info di folder exe (naik maksimal 4 tingkat), atau None."""
+    try:
+        p = Path(exe_path).parent
+    except Exception:
+        return None
+    for _ in range(4):
+        try:
+            with os.scandir(p) as it:
+                for e in it:
+                    n = e.name.lower()
+                    if n.startswith("goggame-") and n.endswith(".info"):
+                        return e.name[len("goggame-"):-len(".info")]
+        except OSError:
+            return None
+        if p.name.lower() in _GOG_STOP_DIRS or p.parent == p:
+            return None
+        p = p.parent
+    return None
+
+def game_source(name):
+    """{'source': 'gog'|'other', 'gog_id': str|None}. Game dianggap GOG kalau (1) dibuat lewat GOG
+    Store (tanda 'source' di runner_config.json) atau (2) folder game-nya berisi goggame-*.info -
+    jadi game GOG yang diinstall manual lewat INSTALL APPS / + ADD juga ikut terdeteksi."""
+    hit = _source_cache.get(name)
+    if hit is not None:
+        return hit
+    cfg = load_runner_config().get(name) or {}
+    result = {"source": "other", "gog_id": None}
+    if cfg.get("source") == "gog":
+        result = {"source": "gog", "gog_id": cfg.get("gog_id")}
+    else:
+        exe = extract_exe_path_from_script(bashlaunch_dir / f"{name}.sh")
+        gid = _detect_gog_id(exe) if exe else None
+        if gid:
+            result = {"source": "gog", "gog_id": gid}
+    _source_cache[name] = result
+    return result
+
+def source_label(name):
+    return "GOG" if game_source(name)["source"] == "gog" else "Non-GOG"
+
+def update_script_list(sort_order=None, keep_cache=False):
+    """Isi ulang daftar game: urutan (A-Z/Z-A) + filter pencarian. Game yang sedang dipilih
+    tetap terpilih setelah daftar dimuat ulang (kalau masih lolos filter)."""
+    if not keep_cache:
+        _source_cache.clear()
+
+    if sort_order is None:
+        try:
+            sort_order = "descending" if sort_combo.get() == "Z-A" else "ascending"
+        except NameError:
+            sort_order = "ascending"
+
+    previous = None
+    try:
+        focused = tree.focus()
+        if focused:
+            previous = tree.item(focused, "values")[1]
+    except (tk.TclError, IndexError):
+        previous = None
+
     for row in tree.get_children():
         tree.delete(row)
-    
-    script_files = sorted(bashlaunch_dir.glob("*.sh"), key=lambda x: x.stem.lower())
+
+    all_files = sorted(bashlaunch_dir.glob("*.sh"), key=lambda x: x.stem.lower())
+    total = len(all_files)
+    try:
+        query = search_var.get().strip().lower()
+    except NameError:
+        query = ""
+    script_files = [f for f in all_files if query in f.stem.lower()] if query else all_files
     if sort_order == "descending":
         script_files.reverse()
-    
+
+    restore_iid = None
     for index, file in enumerate(script_files, start=1):
-        tree.insert("", "end", values=(index, file.stem))
-    
-    if tree.get_children():
-        root.after(100, on_select) 
+        iid = tree.insert("", "end", values=(index, file.stem, source_label(file.stem)))
+        if file.stem == previous:
+            restore_iid = iid
+
+    if library_grid is not None:
+        library_grid.set_items([f.stem for f in script_files])
+
+    shown = len(script_files)
+    try:
+        if query:
+            count_label.config(text=f"{shown} of {total} games")
+        else:
+            count_label.config(text=f"{total} game" + ("" if total == 1 else "s"))
+        if total == 0:
+            set_empty_state("Your library is empty\n\nUse + Add Game, Install Apps or the GOG Store\nto get started")
+        elif shown == 0:
+            set_empty_state(f'No games match "{query}"')
+        else:
+            set_empty_state("")
+    except NameError:
+        pass
+
+    if restore_iid is not None:
+        tree.selection_set(restore_iid)
+        tree.focus(restore_iid)
+        tree.see(restore_iid)
+        root.after(100, on_select)
+    elif tree.get_children():
+        root.after(100, on_select)
     else:
         game_title_label.config(text="No Game Selected")
         icon_label.config(image='')
         icon_label.image = None
         info_text.set("Select a game to view details")
+        _sync_action_buttons(False)
 
 ANSI_ESCAPE_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
@@ -4069,7 +4797,7 @@ def open_log_window(script_name_only):
 
     if entry and entry.get("window") is not None and entry["window"].winfo_exists():
         entry["window"].lift()
-        entry["window"].focus_force()
+        entry["window"].focus_set()
         return
 
     win = tk.Toplevel(root)
@@ -4191,6 +4919,11 @@ def run_script():
         return
 
     runner_cfg = load_runner_config()
+    prev_entry = runner_cfg.get(script_name_only) or {}
+    choice = dict(choice)
+    for key in ("source", "gog_id"):          # tanda GOG jangan hilang saat runner diganti
+        if key in prev_entry and key not in choice:
+            choice[key] = prev_entry[key]
     runner_cfg[script_name_only] = choice
     save_runner_config(runner_cfg)
 
@@ -4267,6 +5000,75 @@ def reset_button_hover_state(btn):
             btn.state(["active"])
     except Exception:
         pass
+
+def add_game_shortcut(name, exe_path, choice, icon_image=None, work_dir=None, source=None, gog_id=None):
+    """Tambah game ke daftar launcher TANPA dialog (script .sh + runner config + ikon), dipakai
+    GOG Store setelah installer selesai - setara dengan + ADD, tapi otomatis dan langsung
+    terkait ke runner/prefix tempat game itu diinstall (penting untuk game GOG).
+
+    choice: dict hasil ask_runner_choice (runner, prefix_code, prefix_path, proton_*, ...).
+    icon_image: PIL.Image atau path gambar (mis. cover GOG / .ico) - dipotong persegi seperti Change Icon.
+    Kalau nama sudah dipakai game LAIN, nama diberi angka ('Nama 2'); kalau exe-nya sama
+    (mis. install ulang) entri lama diperbarui. Harus dipanggil dari main thread (Tk).
+    source: "gog" untuk game yang diunduh/diinstall lewat GOG Store (gog_id = id produk GOG);
+    game tanpa tanda ini tetap dideteksi lewat goggame-*.info di folder game (lihat game_source).
+    Return nama script (tanpa .sh) yang dipakai."""
+    exe_resolved = Path(exe_path).resolve()
+    folder_resolved = Path(work_dir).resolve() if work_dir else exe_resolved.parent
+    base = "".join(c for c in (name or "") if c.isalnum() or c in (' ', '_', '-')).strip() or exe_resolved.stem
+    safe_name, n = base, 2
+    while True:
+        script_path = bashlaunch_dir / f"{safe_name}.sh"
+        if not script_path.exists():
+            break
+        existing = extract_exe_path_from_script(script_path)
+        if existing and Path(existing) == exe_resolved:
+            break
+        safe_name = f"{base} {n}"
+        n += 1
+
+    cfg_entry = dict(choice)
+    cfg_entry.setdefault("launch_options", "")
+    cfg_entry.setdefault("comment", "")
+    if source:
+        cfg_entry["source"] = source
+    if gog_id not in (None, ""):
+        cfg_entry["gog_id"] = str(gog_id)
+    bashlaunch_dir.mkdir(parents=True, exist_ok=True)
+    with open(script_path, "w") as script_file:
+        script_file.write(build_script_content(str(folder_resolved), str(exe_resolved), cfg_entry))
+    script_path.chmod(0o755)
+
+    runner_cfg = load_runner_config()
+    runner_cfg[safe_name] = cfg_entry
+    save_runner_config(runner_cfg)
+
+    icon_path = icon_dir / f"{safe_name}.png"
+    if icon_image is not None and not icon_path.exists():
+        try:
+            src = icon_image
+            if isinstance(src, (str, Path)):
+                src = Image.open(src)
+                sizes = src.info.get("sizes")
+                if sizes:                      # .ico multi-ukuran: pakai yang terbesar
+                    src.size = max(sizes)
+                src.load()
+            image = src.convert("RGBA")
+            side = min(image.size)
+            left, top = (image.width - side) // 2, (image.height - side) // 2
+            image = image.crop((left, top, left + side, top + side)).resize((ICON_SIZE, ICON_SIZE), Image.LANCZOS)
+            image.save(icon_path, "PNG")
+        except Exception as e:
+            print(f"[WLM] Could not save icon for {safe_name}: {e}")
+
+    update_script_list()
+    for iid in tree.get_children():
+        if tree.item(iid, "values")[1] == safe_name:
+            tree.selection_set(iid)
+            tree.focus(iid)
+            tree.see(iid)
+            break
+    return safe_name
 
 def add_script():
     """Add a new script"""
@@ -4380,6 +5182,8 @@ def remove_script():
         try:
             script_path.unlink(missing_ok=True)
             icon_path.unlink(missing_ok=True)
+            if cover_store is not None:
+                cover_store.forget(script_name)
 
             runner_cfg = load_runner_config()
             if script_name in runner_cfg:
@@ -4428,6 +5232,8 @@ def rename_script():
             old_path.rename(new_path)
             if old_icon.exists():
                 old_icon.rename(new_icon)
+            if cover_store is not None:
+                cover_store.rename(old_name, new_name)
 
             runner_cfg = load_runner_config()
             if old_name in runner_cfg:
@@ -4485,6 +5291,19 @@ def change_icon():
             messagebox.showerror("Error", f"Failed to process image: {str(e)}")
             safe_status_config(text=f"Error processing image: {str(e)}", fg=COLORS["danger"])
 
+def round_icon_corners(image, radius=16):
+    """Bulatkan sudut gambar ikon (RGBA) supaya tampil seperti kartu modern."""
+    try:
+        w, h = image.size
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
+        alpha = ImageChops.multiply(image.getchannel("A"), mask)
+        rounded = image.copy()
+        rounded.putalpha(alpha)
+        return rounded
+    except Exception:
+        return image
+
 def load_icon(script_name):
     """Load and display the icon at the correct size"""
     icon_path = icon_dir / f"{script_name}.png"
@@ -4498,6 +5317,7 @@ def load_icon(script_name):
             if image.size != (ICON_WIDTH, ICON_HEIGHT):
                 image = image.resize((ICON_WIDTH, ICON_HEIGHT), Image.LANCZOS)
             
+            image = round_icon_corners(image)
             photo = ImageTk.PhotoImage(image)
             
             icon_label.config(image=photo)
@@ -4514,6 +5334,10 @@ def on_select(event=None):
     """Handle item selection in the treeview"""
     def do_select():
         selected = tree.focus()
+        _sync_action_buttons(bool(selected))
+
+        if library_grid is not None:
+            library_grid.highlight(tree.item(selected, "values")[1] if selected else None)
         
         if selected:
             script_name = tree.item(selected, "values")[1]
@@ -4544,7 +5368,11 @@ def on_select(event=None):
                         if len(lines) >= 2:
                             folder_path = lines[1].strip().replace('cd "', '').replace('"', '')
                     
-                    info_text.set(f"Script File: {script_name}.sh\n"
+                    src = game_source(script_name)
+                    src_text = "GOG" + (f" (id {src['gog_id']})" if src["gog_id"] else "") \
+                        if src["source"] == "gog" else "Non-GOG (added manually / other installer)"
+                    info_text.set(f"Source: {src_text}\n"
+                                  f"Script File: {script_name}.sh\n"
                                   f"Location: {folder_path}\n"
                                   f"Last Modified: {mod_time}\n"
                                   f"Size: {size_str}")
@@ -4593,6 +5421,77 @@ def open_file_manager():
     except Exception as e:
         safe_status_config(text=f"Error opening file manager: {str(e)}", fg=COLORS["danger"])
 
+def open_save_manager(script_name=None, parent_win=None):
+    """Buka Save Manager (gog_saves.py) untuk sebuah game: backup/restore save lokal dan cloud
+    save GOG (cek + download yang menimpa, dengan peringatan).
+
+    - script_name: nama game (tanpa .sh). Kalau tidak diisi, diambil dari game yang sedang
+      dipilih di daftar/tree utama (dipakai kalau dipanggil dari luar dialog Play, mis. menu lain).
+    - parent_win: window induk tempat dialog Saves harus muncul DI ATASNYA (mis. dialog
+      Select Runner - Play). Kosong = jendela utama launcher.
+    """
+    from types import SimpleNamespace
+    if script_name is None:
+        selected = tree.focus()
+        if not selected:
+            messagebox.showinfo("Info", "Please select a game first")
+            return
+        script_name = tree.item(selected, "values")[1]
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import gog_saves
+    except ImportError as e:
+        messagebox.showerror("Saves", f"gog_saves.py was not found next to the launcher:\n{e}")
+        return
+    script_path = bashlaunch_dir / f"{script_name}.sh"
+    src = game_source(script_name)
+    parent_for_dialog = parent_win if (parent_win is not None and parent_win.winfo_exists()) else root
+
+    # Kalau dipanggil dari dialog modal (mis. Select Runner - Play, yang memegang grab_set()),
+    # lepas dulu grab-nya - kalau tidak, jendela Save Manager (non-modal) akan muncul tapi
+    # semua isinya tidak merespon klik sama sekali selama dialog Play masih memegang grab.
+    # Grab itu dikembalikan otomatis begitu jendela Save Manager ditutup (lihat <Destroy> di bawah).
+    release_grab_on = parent_win if (parent_win is not None and parent_win.winfo_exists()) else None
+    if release_grab_on is not None:
+        try:
+            release_grab_on.grab_release()
+        except tk.TclError:
+            pass
+
+    def is_running():
+        entry = running_games.get(script_name)
+        return bool(entry and entry.get("proc") is not None and entry["proc"].poll() is None)
+
+    def open_folder(path):
+        try:
+            subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             env=get_clean_subprocess_env())
+        except Exception as e:
+            safe_status_config(text=f"Could not open folder: {e}", fg=COLORS["danger"])
+
+    gog_saves.open_dialog(SimpleNamespace(
+        root=parent_for_dialog, fonts=FONTS, colors=lambda: COLORS, data_dir=directory, name=script_name,
+        exe_path=extract_exe_path_from_script(script_path), choice=load_runner_config().get(script_name) or {},
+        source=src["source"], human_size=human_size, open_folder=open_folder, is_running=is_running,
+        place_dialog=place_dialog,
+        status=lambda text, level="info": safe_status_config(
+            text=text, fg=COLORS["text_secondary" if level == "info" else level])))
+
+    if release_grab_on is not None:
+        saves_win = gog_saves._dialogs.get(script_name)
+        if saves_win is not None and saves_win.winfo_exists():
+            def restore_grab(_evt=None, _target=release_grab_on):
+                if _target.winfo_exists():
+                    try:
+                        _target.grab_set()
+                        _target.lift()
+                        _target.focus_set()
+                    except tk.TclError:
+                        pass
+            saves_win.bind("<Destroy>", restore_grab, add="+")
+
 def open_wine_prefix_folder():
     """Open the Wine Prefix folder (~/.wine)"""
     wine_prefix = os.environ.get("WINEPREFIX", Path.home() / ".wine")
@@ -4618,23 +5517,153 @@ def open_winecfg():
         messagebox.showerror("Error", "The 'wine' command was not found.")
         safe_status_config(text="Error: Wine command not found.", fg=COLORS["danger"])
 
-def run_exe_setup():
-    """Run EXE setup"""
-    exe_path = filedialog.askopenfilename(
-        title="Select Setup Executable (.exe)",
-        filetypes=[("Executable Files", "*.exe"), ("All Files", "*.*")]
-    )
+def _get_install_watch():
+    """Muat install_watch.py (satu folder dengan launcher). None kalau file itu tidak ada -
+    fitur auto shortcut saja yang mati, install tetap jalan."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import install_watch
+        return install_watch
+    except ImportError:
+        print("[WLM] install_watch.py not found next to the launcher - auto shortcut disabled.")
+        return None
+
+def ask_shortcut_dialog(candidates, drive_c, default_name):
+    """Dialog konfirmasi shortcut untuk install manual NON-GOG (exe kandidat tidak bisa dipastikan).
+    candidates: hasil install_watch.find_candidates (terbesar dulu). Return {"name", "exe"} atau None."""
+    def rel(path):
+        try:
+            return str(Path(path).relative_to(drive_c))
+        except (ValueError, TypeError):
+            return str(path)
+
+    exe_paths = [c["exe"] for c in candidates]
+    labels = [f"{rel(c['exe'])}  ({human_size(c['size'])})" for c in candidates]
+
+    dialog = tk.Toplevel(root)
+    dialog.withdraw()
+    dialog.title("Add Shortcut")
+    dialog.configure(bg=COLORS["primary"])
+    dialog.resizable(False, False)
+    result = {"value": None}
+
+    frame = ttk.Frame(dialog, padding=15)
+    frame.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(frame, text="Setup finished. Add the installed program to the launcher?",
+              font=FONTS["normal"]).pack(anchor="w", pady=(0, 10))
+    ttk.Label(frame, text="Name:", font=FONTS["small"]).pack(anchor="w", pady=(0, 2))
+    name_entry = ttk.Entry(frame, width=60, font=FONTS["small"])
+    name_entry.insert(0, default_name)
+    name_entry.pack(fill=tk.X, pady=(0, 8))
+    ttk.Label(frame, text="Executable to launch:", font=FONTS["small"]).pack(anchor="w", pady=(0, 2))
+    combo = ttk.Combobox(frame, values=labels, state="readonly", width=60, font=FONTS["small"])
+    combo.current(0)
+    combo.pack(fill=tk.X, pady=(0, 6))
+
+    def do_browse():
+        start = str(drive_c) if drive_c and Path(drive_c).is_dir() else str(Path.home())
+        picked = filedialog.askopenfilename(
+            parent=dialog, title="Select Executable", initialdir=start,
+            filetypes=[("Executable Files", "*.exe"), ("All Files", "*.*")])
+        if picked:
+            exe_paths.append(Path(picked))
+            labels.append(picked)
+            combo["values"] = labels
+            combo.current(len(labels) - 1)
+
+    ttk.Button(frame, text="Browse Other...", command=do_browse, style="Custom.TButton").pack(anchor="w", pady=(0, 12))
+
+    def do_ok():
+        name = name_entry.get().strip()
+        if not name:
+            messagebox.showerror("Error", "Please enter a name.", parent=dialog)
+            return
+        result["value"] = {"name": name, "exe": exe_paths[combo.current()]}
+        dialog.destroy()
+
+    row = ttk.Frame(frame)
+    row.pack()
+    ttk.Button(row, text="Add Shortcut", command=do_ok, style="Custom.TButton", width=14).grid(row=0, column=0, padx=4)
+    ttk.Button(row, text="Skip", command=dialog.destroy, style="Custom.TButton", width=14).grid(row=0, column=1, padx=4)
+
+    dialog.update_idletasks()
+    w, h = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
+    x = max(root.winfo_x() + (root.winfo_width() // 2) - (w // 2), 0)
+    y = max(root.winfo_y() + (root.winfo_height() // 2) - (h // 2), 0)
+    dialog.geometry(f"+{x}+{y}")
+    dialog.deiconify()
+    dialog.transient(root)
+    dialog.grab_set()
+    dialog.lift()
+    dialog.focus_set()
+    dialog.wait_window()
+    return result["value"]
+
+def _watch_manual_install(iw, proc, choice, started):
+    """Thread: pantau installer manual (INSTALL APPS) sampai game terdeteksi/installer berhenti."""
+    res = iw.wait_for_install(proc, choice, None, started)
+    root.after(0, lambda: _finish_manual_install(choice, res))
+
+def _finish_manual_install(choice, res):
+    """Main thread: tambahkan hasil install manual ke daftar game. Installer GOG (ada
+    goggame-*.info) langsung otomatis; installer lain minta konfirmasi dulu karena exe-nya
+    hanya bisa ditebak."""
+    found, rc, drive_c = res["found"], res["rc"], res["drive_c"]
+    try:
+        if found is not None:
+            name = add_game_shortcut(found.get("name") or Path(found["exe"]).stem, found["exe"], choice,
+                                     icon_image=found.get("icon"), work_dir=found.get("workdir"))
+            safe_status_config(text=f"Setup finished - '{name}' was added to the launcher.", fg=COLORS["success"])
+            return
+        if rc != 0:
+            safe_status_config(text=f"Setup closed (exit code {rc}) - no shortcut was added.",
+                               fg=COLORS["text_secondary"])
+            return
+        if not res["candidates"]:
+            safe_status_config(text="Setup finished - no new game detected, so no shortcut was added.",
+                               fg=COLORS["text_secondary"])
+            return
+        picked = ask_shortcut_dialog(res["candidates"], drive_c, res["candidates"][0]["game_dir"].name)
+        if not picked:
+            safe_status_config(text="Setup finished - no shortcut added.", fg=COLORS["text_secondary"])
+            return
+        name = add_game_shortcut(picked["name"], picked["exe"], choice)
+        safe_status_config(text=f"Setup finished - '{name}' was added to the launcher.", fg=COLORS["success"])
+    except Exception as e:
+        safe_status_config(text=f"Could not add shortcut: {e}", fg=COLORS["danger"])
+
+def run_exe_setup(exe_path=None, choice=None, installer_args=None, auto_shortcut=True):
+    """Run EXE setup. exe_path opsional - kalau diisi (mis. installer hasil download GOG Store),
+    dialog pilih file dilewati dan langsung lanjut ke pilihan runner.
+    choice opsional - kalau diisi (hasil ask_runner_choice, mis. dipilih saat download di GOG
+    Store), dialog pilih runner juga dilewati dan installer langsung jalan di runner/prefix itu.
+    installer_args opsional - list argumen tambahan untuk installer (mis. ["/SILENT"]).
+    auto_shortcut - kalau True (bawaan), setelah installer selesai launcher mendeteksi game yang
+    baru terpasang di prefix itu dan menambahkannya ke daftar game (lihat install_watch.py).
+    GOG Store memberi False karena punya watcher sendiri.
+    Return subprocess.Popen proses installer (atau None kalau dibatalkan/gagal dijalankan)."""
+    if not exe_path:
+        exe_path = filedialog.askopenfilename(
+            title="Select Setup Executable (.exe)",
+            filetypes=[("Executable Files", "*.exe"), ("All Files", "*.*")]
+        )
     
     if not exe_path:
         return
 
-    choice = ask_runner_choice(parent_script_name=None, purpose="setup")
+    if choice is None:
+        choice = ask_runner_choice(parent_script_name=None, purpose="setup")
     if choice is None:
         safe_status_config(text="Setup cancelled.", fg=COLORS["text_secondary"])
         return
 
+    proc = None
+    started = time.time()
     try:
         env_vars, extra_args = parse_launch_options(choice.get("launch_options", ""))
+        extra_args = list(extra_args) + list(installer_args or [])
         env = get_clean_subprocess_env()
         for key, val in env_vars:
             env[key] = val
@@ -4643,7 +5672,7 @@ def run_exe_setup():
             env["STEAM_COMPAT_DATA_PATH"] = choice["prefix_path"]
             env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(find_steam_install_path())
             command = [choice["proton_path"], "run", exe_path] + extra_args
-            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
             runner_label = "Proton GE" if choice["runner"] == "protonge" else "Proton-CachyOS"
             safe_status_config(
                 text=f"Running setup for {Path(exe_path).name} via {runner_label} (prefix: {choice['prefix_code']})...",
@@ -4652,7 +5681,7 @@ def run_exe_setup():
             if choice.get("prefix_path"):
                 env["WINEPREFIX"] = choice["prefix_path"]
             command = ["wine", exe_path] + extra_args
-            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
             if choice.get("prefix_code"):
                 safe_status_config(text=f"Running setup for {Path(exe_path).name} via Wine (prefix: {choice['prefix_code']})...", fg=COLORS["text_secondary"])
             else:
@@ -4662,6 +5691,35 @@ def run_exe_setup():
         safe_status_config(text="Error: Runner command not found.", fg=COLORS["danger"])
     except Exception as e:
         safe_status_config(text=f"Error running setup: {str(e)}", fg=COLORS["danger"])
+    if proc is not None and auto_shortcut:
+        iw = _get_install_watch()
+        if iw is not None:
+            threading.Thread(target=_watch_manual_install, args=(iw, proc, choice, started),
+                             daemon=True).start()
+    return proc
+
+def open_gog_store():
+    """Buka jendela GOG Store. Seluruh logikanya ada di gog_store.py (file terpisah, satu folder
+    dengan launcher ini) - disini hanya jembatan ke fungsi-fungsi launcher."""
+    from types import SimpleNamespace
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import gog_store
+    except ImportError as e:
+        messagebox.showerror("GOG Store", f"gog_store.py was not found next to the launcher:\n{e}")
+        return
+    gog_store.open_dialog(SimpleNamespace(
+        root=root, fonts=FONTS, data_dir=directory, colors=lambda: COLORS,
+        human_size=human_size, clean_env=get_clean_subprocess_env,
+        task_log=open_task_log_window, install_exe=run_exe_setup,
+        add_shortcut=add_game_shortcut,
+        ask_runner=lambda parent=None, game_title=None: ask_runner_choice(
+            parent_script_name=None, purpose="setup", parent=parent, game_title=game_title),
+        status=lambda text, level="info": safe_status_config(
+            text=text, fg=COLORS["text_secondary" if level == "info" else level]),
+    ))
 
 def sort_by_selected(event=None):
     """Handle sorting change"""
@@ -4690,42 +5748,253 @@ COLORS = THEMES.get(CURRENT_THEME, THEMES["default"])
 
 root = tk.Tk()
 root.title("Wine Launch Manager")
-root.protocol("WM_DELETE_WINDOW", lambda: (save_window_config(), root.destroy()))
+def on_app_close():
+    """Tutup launcher. Download GOG yang sedang berjalan dijeda dan disimpan dulu (lihat
+    gog_store.shutdown_downloads), supaya bisa di-Resume saat launcher dijalankan lagi."""
+    try:
+        save_window_config()
+    finally:
+        gs = sys.modules.get("gog_store")
+        if gs is not None and hasattr(gs, "shutdown_downloads"):
+            try:
+                root.withdraw()          # jendela hilang dulu selagi download dijeda
+                gs.shutdown_downloads()
+            except Exception as e:
+                print(f"[WLM] Could not pause GOG downloads on exit: {e}")
+        root.destroy()
+
+root.protocol("WM_DELETE_WINDOW", on_app_close)
 
 style = ttk.Style()
-style.theme_use('clam') 
+style.theme_use('clam')
+apply_best_font_family() 
 
 window_size = config["window_size"]
 window_position = config["window_position"]
 
+# Ukuran jendela utama dibatasi ke area layar yang benar-benar tersedia. Sebelumnya minsize
+# 1000x720 + title bar (~36px) lebih tinggi dari layar 768px dikurangi panel (~32px), jadi bagian
+# bawah jendela menyelinap di bawah taskbar dan taskbar autohide ikut naik tiap jendela diklik.
+# Margin vertikal 70px = title bar (~36px) + panel (~32px).
+_screen_w, _screen_h = root.winfo_screenwidth(), root.winfo_screenheight()
+_MAX_W = max(640, _screen_w - 20)
+_MAX_H = max(480, _screen_h - 70)
+try:
+    _w, _h = (int(v) for v in window_size.split('x'))
+except ValueError:
+    _w, _h = 1000, 720
+_w, _h = min(max(_w, 640), _MAX_W), min(max(_h, 480), _MAX_H)
+
+_pos = None
 if window_position:
-    root.geometry(f"{window_size}{window_position}") 
-else:
-    width, height = map(int, window_size.split('x'))
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    x = (screen_width // 2) - (width // 2)
-    y = (screen_height // 2) - (height // 2)
-    root.geometry(f"{width}x{height}+{x}+{y}")
+    _m = re.fullmatch(r"\+(-?\d+)\+(-?\d+)", window_position)
+    if _m:
+        _pos = (int(_m.group(1)), int(_m.group(2)))
+if _pos is None:
+    _pos = ((_screen_w - _w) // 2, max(0, (_screen_h - _h) // 2 - 30))
+# Posisi tersimpan dijaga tetap didalam layar (mis. setelah resolusi/monitor berubah).
+_x = max(0, min(_pos[0], _screen_w - _w))
+_y = max(0, min(_pos[1], _screen_h - _h - 70))
+root.geometry(f"{_w}x{_h}+{_x}+{_y}")
+_last_normal_geometry["size"], _last_normal_geometry["position"] = f"{_w}x{_h}", f"+{_x}+{_y}"
 
 
 root.resizable(True, True)
-root.minsize(1000, 720)
+root.minsize(min(1000, _MAX_W), min(720, _MAX_H))
+
+_pre_zoom_geometry = {"value": None}
+
+def _maximize_manually():
+    """Fallback kalau window manager tidak mendukung maximize lewat Tk: samakan ke ukuran layar."""
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"{max(640, sw - 20)}x{max(480, sh - 70)}+0+0")
+    _manual_zoom["on"] = True
+
+def toggle_maximize_window(_evt=None):
+    """Maximize/un-maximize jendela utama. Kebanyakan window manager Linux sudah punya tombol
+    maximize sendiri di titlebar (otomatis jalan karena root.resizable(True, True) di atas),
+    tapi tidak semua desktop/WM menampilkannya (mis. beberapa tiling WM) - F11 dijadikan cara
+    pasti yang selalu ada, dan dipakai juga kalau tombol WM-nya entah kenapa tidak merespon."""
+    if _is_maximized():
+        if _manual_zoom["on"]:
+            _manual_zoom["on"] = False
+            if _pre_zoom_geometry["value"]:
+                root.geometry(_pre_zoom_geometry["value"])
+        else:
+            _set_maximized(False)
+        _pre_zoom_geometry["value"] = None
+    else:
+        _pre_zoom_geometry["value"] = root.geometry()
+        if not _set_maximized(True):
+            _maximize_manually()
+    _save_window_config_debounced()
+
+root.bind("<F11>", toggle_maximize_window)
+
+if config.get("window_maximized"):
+    # Terakhir ditutup dalam keadaan maximize -> buka maximize lagi. Tk menerapkannya begitu jendela
+    # tampil; dicek lagi sebentar kemudian kalau window manager mengabaikannya.
+    if not _set_maximized(True):
+        _maximize_manually()
+
+    def _reapply_maximize():
+        if not _manual_zoom["on"] and not _is_maximized():
+            _set_maximized(True)
+    root.after(400, _reapply_maximize)
+
+_window_config_save_after_id = {"id": None}
+
+def _save_window_config_debounced(_evt=None):
+    """Simpan ukuran & posisi jendela utama otomatis setiap kali pengguna selesai
+    menggeser/mengubah ukurannya - jadi tidak perlu menutup aplikasi dulu supaya posisinya
+    "diingat", dan jendela tidak kembali geser ke posisi lama tiap kali dibuka lagi.
+    Di-debounce ~600ms (ditunda ulang tiap ada event baru) supaya tidak menulis file berkali-kali
+    selagi jendela masih aktif digeser/di-resize - baru benar-benar disimpan begitu gerakannya
+    berhenti."""
+    pending = _window_config_save_after_id["id"]
+    if pending is not None:
+        try:
+            root.after_cancel(pending)
+        except (ValueError, tk.TclError):
+            pass
+
+    def _do_save():
+        _window_config_save_after_id["id"] = None
+        try:
+            # Jangan simpan saat window di-minimize. Saat maximize tetap disimpan, tapi
+            # save_window_config() menyimpan ukuran/posisi NORMAL terakhir + flag 'maximized'
+            # (bukan ukuran layar penuh), jadi jendela dibuka maximize lagi di sesi berikutnya.
+            if root.state() in ("iconic", "withdrawn"):
+                return
+        except tk.TclError:
+            return
+        save_window_config()
+
+    _window_config_save_after_id["id"] = root.after(600, _do_save)
+
+root.bind("<Configure>", _save_window_config_debounced)
 
 all_buttons = []
+_BUTTON_STYLES = {}
 
-header_frame = ttk.Frame(root, padding=(15, 8))
+def make_button(parent, text, command, style_name="Custom.TButton", **kwargs):
+    """Buat ttk.Button + daftarkan style-nya (dipakai update_widget_colors saat tema berganti)."""
+    btn = ttk.Button(parent, text=text, command=command, style=style_name, **kwargs)
+    all_buttons.append(btn)
+    _BUTTON_STYLES[btn] = style_name
+    return btn
+
+# --------------------------------------------------------------------------- header
+header_frame = ttk.Frame(root, style="Header.TFrame", padding=(16, 10))
 header_frame.pack(fill=tk.X, side=tk.TOP)
 
+# Hamburger: membuka panel menu di sisi kiri (di dalam jendela, jadi tidak pernah "nyasar" ke monitor lain).
+menu_btn = ttk.Button(header_frame, text="\u2630", style="Hamburger.Custom.TButton", width=3, takefocus=False)
+menu_btn.pack(side=tk.LEFT, padx=(0, 14))
+
 title_label = tk.Label(header_frame,
-                        text="WINE LAUNCH MANAGER",
-                        font=FONTS["title"])
+                        text="Wine Launch Manager",
+                        font=FONTS["display"],
+                        bd=0)
 title_label.pack(side=tk.LEFT)
 
-status_label = tk.Label(header_frame,
-                            text=f"Using {COLORS['name']} theme",
-                            font=FONTS["small"])
-status_label.pack(side=tk.RIGHT)
+version_label = tk.Label(header_frame, text=f"v{WLM_VERSION}", font=FONTS["small"], bd=0)
+version_label.pack(side=tk.LEFT, padx=(10, 0), pady=(6, 0))
+
+header_line = tk.Frame(root, height=1, bd=0)
+header_line.pack(fill=tk.X, side=tk.TOP)
+
+# --------------------------------------------------------------------------- toolbar: cari + aksi library
+toolbar = ttk.Frame(root, padding=(16, 12, 16, 4))
+toolbar.pack(fill=tk.X, side=tk.TOP)
+
+search_var = tk.StringVar()
+search_entry = ttk.Entry(toolbar, textvariable=search_var, style="Search.TEntry",
+                         font=FONTS["body"], width=34)
+search_entry.pack(side=tk.LEFT)
+
+# Placeholder digambar sebagai label di atas entry (ttk.Entry tidak punya placeholder).
+search_hint = tk.Label(search_entry, text="Search games...   (Ctrl+F)", font=FONTS["normal"],
+                       bd=0, cursor="xterm")
+
+search_hint.place(x=12, rely=0.5, anchor="w")
+search_hint.bind("<Button-1>", lambda e: search_entry.focus_set())
+
+_search_focus = {"on": False}
+
+def _update_search_hint():
+    if search_var.get() or _search_focus["on"]:
+        search_hint.place_forget()
+    else:
+        search_hint.place(x=12, rely=0.5, anchor="w")
+
+_search_job = {"id": None}
+
+def _apply_search():
+    _search_job["id"] = None
+    update_script_list(keep_cache=True)
+
+def _on_search_changed(*_):
+    _update_search_hint()
+    if _search_job["id"] is not None:
+        try:
+            root.after_cancel(_search_job["id"])
+        except (ValueError, tk.TclError):
+            pass
+    _search_job["id"] = root.after(150, _apply_search)
+
+search_var.trace_add("write", _on_search_changed)
+
+def _focus_search(_event=None):
+    search_entry.focus_set()
+    search_entry.select_range(0, tk.END)
+    return "break"
+
+def _clear_search(_event=None):
+    if search_var.get():
+        search_var.set("")
+        return "break"
+    root.focus_set()
+
+search_entry.bind("<Escape>", _clear_search)
+
+def _search_focus_changed(on):
+    _search_focus["on"] = on
+    _update_search_hint()
+
+search_entry.bind("<FocusIn>", lambda e: _search_focus_changed(True), add="+")
+search_entry.bind("<FocusOut>", lambda e: _search_focus_changed(False), add="+")
+root.bind("<Control-f>", _focus_search)
+root.bind("<Control-F>", _focus_search)
+
+add_btn = make_button(toolbar, "+  Add Game", add_script, "Accent.TButton")
+add_btn.pack(side=tk.RIGHT)
+
+install_apps_btn = make_button(toolbar, "Install Apps", run_exe_setup)
+install_apps_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+gog_btn = make_button(toolbar, "GOG Store", open_gog_store)
+gog_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+# --------------------------------------------------------------------------- footer: status + tema
+footer = ttk.Frame(root, style="Footer.TFrame", padding=(16, 7))
+footer.pack(fill=tk.X, side=tk.BOTTOM)
+
+status_label = tk.Label(footer, text="Ready", font=FONTS["small"], anchor="w", bd=0)
+status_label.pack(side=tk.LEFT)
+
+theme_names = [data["name"] for data in THEMES.values()]
+theme_combo = ttk.Combobox(footer,
+                            values=theme_names,
+                            state="readonly",
+                            width=20,
+                            font=FONTS["normal"])
+theme_combo.set(COLORS["name"])
+theme_combo.pack(side=tk.RIGHT)
+theme_combo.bind("<<ComboboxSelected>>", on_theme_selected)
+
+theme_label = ttk.Label(footer, text="Theme", style="FooterMuted.TLabel")
+theme_label.pack(side=tk.RIGHT, padx=(0, 8))
 
 def safe_status_config(**kwargs):
     """Update status_label dengan aman. Kalau window utama sudah ditutup (mis. pengguna
@@ -4740,150 +6009,254 @@ def safe_status_config(**kwargs):
     except tk.TclError:
         pass
 
-toolbar = ttk.Frame(root, padding=(15, 5, 15, 0))
-toolbar.pack(fill=tk.X, side=tk.TOP)
+# --------------------------------------------------------------------------- panel samping (menu hamburger)
+# Menu lama (tk.Menu popup yang di-post ke koordinat layar) bisa muncul di monitor lain pada setup
+# dua monitor. Panel ini bagian dari jendela utama: meluncur dari kiri, menutupi sisi kiri jendela,
+# dan tertutup sendiri setelah memilih menu / klik di luar panel / tekan Esc.
+SIDE_PANEL_WIDTH = 300
+_side = {"open": False, "x": -SIDE_PANEL_WIDTH, "job": None}
 
-theme_label = ttk.Label(toolbar, text="Theme:", font=FONTS["normal"])
-theme_label.pack(side=tk.LEFT, padx=(0, 5))
+side_panel = ttk.Frame(root, style="Side.TFrame")
+_side_head = ttk.Frame(side_panel, style="Side.TFrame", padding=(16, 12, 16, 8))
+_side_head.pack(fill=tk.X)
+ttk.Label(_side_head, text="MENU", style="SideTitle.TLabel").pack(side=tk.LEFT)
+ttk.Separator(side_panel, orient=tk.HORIZONTAL, style="Side.TSeparator").pack(fill=tk.X)
 
-theme_names = [data["name"] for data in THEMES.values()]
-theme_combo = ttk.Combobox(toolbar, 
-                            values=theme_names,
-                            state="readonly",
-                            width=20,
-                            font=FONTS["normal"])
-theme_combo.set(COLORS["name"])
-theme_combo.pack(side=tk.LEFT, padx=(0, 15))
-theme_combo.bind("<<ComboboxSelected>>", on_theme_selected)
+_side_body = ttk.Frame(side_panel, style="Side.TFrame")
+_side_body.pack(fill=tk.BOTH, expand=True)
+side_canvas = tk.Canvas(_side_body, highlightthickness=0, bd=0, bg=COLORS["secondary"])
+side_scroll = ttk.Scrollbar(_side_body, orient=tk.VERTICAL, command=side_canvas.yview)
+side_canvas.configure(yscrollcommand=side_scroll.set)
+side_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+side_inner = ttk.Frame(side_canvas, style="Side.TFrame")
+_side_inner_id = side_canvas.create_window((0, 0), window=side_inner, anchor="nw")
 
-settings_btn = ttk.Button(toolbar, text="SETTINGS", style="Custom.TButton")
-all_buttons.append(settings_btn)
-settings_btn.pack(side=tk.RIGHT)
+def _side_sync(_event=None):
+    """Lebar isi mengikuti kanvas; scrollbar hanya muncul kalau isi lebih tinggi dari panel."""
+    side_canvas.configure(scrollregion=side_canvas.bbox("all"))
+    side_canvas.itemconfigure(_side_inner_id, width=side_canvas.winfo_width())
+    needs_scroll = side_inner.winfo_reqheight() > side_canvas.winfo_height() > 1
+    if needs_scroll and not side_scroll.winfo_ismapped():
+        side_scroll.pack(side=tk.RIGHT, fill=tk.Y, before=side_canvas)
+    elif not needs_scroll and side_scroll.winfo_ismapped():
+        side_scroll.pack_forget()
+        side_canvas.yview_moveto(0)
 
-install_apps_btn = ttk.Button(toolbar, text="INSTALL APPS", command=run_exe_setup, style="Custom.TButton")
-all_buttons.append(install_apps_btn)
-install_apps_btn.pack(side=tk.RIGHT, padx=(0, 8))
+side_inner.bind("<Configure>", _side_sync)
+side_canvas.bind("<Configure>", _side_sync)
 
-settings_menu = tk.Menu(root, tearoff=0)
-settings_menu.add_command(label="View Logs",
-                          command=view_logs)
-settings_menu.add_separator()
-settings_menu.add_command(label="Prefix Configuration Manager...",
-                          command=open_prefix_manager_dialog)
-settings_menu.add_separator()
-settings_menu.add_command(label="Wine Configuration (winecfg)", 
-                          command=open_winecfg)
-settings_menu.add_command(label="Open Wine Prefix Folder", 
-                          command=open_wine_prefix_folder)
-settings_menu.add_command(label="Uninstall Program", 
-                          command=lambda: subprocess.Popen(["wine", "uninstaller"]))
-settings_menu.add_command(label="Wine Explorer", 
-                          command=lambda: subprocess.Popen(["wine", "explorer"]))
-settings_menu.add_separator()
-settings_menu.add_command(label="Extract Proton GE Archive...",
-                          command=extract_protonge_archive)
-settings_menu.add_command(label="Download ProtonGE Online...",
-                          command=open_protonge_download_dialog)
-settings_menu.add_command(label="Open Proton GE Folder",
-                          command=open_protonge_folder)
-settings_menu.add_separator()
-settings_menu.add_command(label="Extract Proton-CachyOS Archive...",
-                          command=extract_protoncachyos_archive)
-settings_menu.add_command(label="Download Proton-CachyOS Online...",
-                          command=open_protoncachyos_download_dialog)
-settings_menu.add_command(label="Open Proton-CachyOS Folder",
-                          command=open_protoncachyos_folder)
-settings_menu.add_separator()
-settings_menu.add_command(label="Refresh List", 
-                          command=lambda: update_script_list())
+def _side_place(x):
+    """Taruh panel di bawah header, setinggi sisa jendela."""
+    _side["x"] = x
+    top = header_frame.winfo_height()
+    side_panel.place(x=x, y=top, width=SIDE_PANEL_WIDTH, relheight=1.0, height=-top)
 
-_settings_menu_state = {"closed_at": 0.0}
+def _side_slide(target, on_done=None, steps=8):
+    """Animasi singkat meluncur ke posisi x target (ease-out)."""
+    if _side["job"] is not None:
+        try:
+            root.after_cancel(_side["job"])
+        except (ValueError, tk.TclError):
+            pass
+        _side["job"] = None
+    start = _side["x"]
 
-def _on_settings_menu_closed(event=None):
-    _settings_menu_state["closed_at"] = time.monotonic()
+    def tick(i=1):
+        t = i / steps
+        _side_place(round(start + (target - start) * (1 - (1 - t) ** 3)))
+        if i < steps:
+            _side["job"] = root.after(15, tick, i + 1)
+        else:
+            _side["job"] = None
+            if on_done:
+                on_done()
+    tick()
 
-settings_menu.bind("<Unmap>", _on_settings_menu_closed)
-
-def _on_global_click_closes_settings_menu(event):
-    if not settings_menu.winfo_ismapped():
+def show_side_panel():
+    if _side["open"]:
         return
-    if event.widget is settings_menu:
+    _side["open"] = True
+    _side_place(0)                  # langsung tampil, tanpa animasi
+    side_panel.tkraise()
+
+def hide_side_panel():
+    if not _side["open"]:
         return
-    settings_menu.unpost()
+    _side["open"] = False
+    side_panel.place_forget()
 
-root.bind_all("<Button-1>", _on_global_click_closes_settings_menu, add="+")
+def toggle_side_panel():
+    hide_side_panel() if _side["open"] else show_side_panel()
 
-def toggle_settings_menu():
-    if time.monotonic() - _settings_menu_state["closed_at"] < 0.25:
+def _side_run(command):
+    """Tutup panel dulu, baru jalankan menunya (dialog muncul di jendela yang bersih)."""
+    hide_side_panel()
+    root.after(20, command)
+
+SIDE_MENU = [
+    ("LOGS & PREFIX", [
+        ("View Logs", view_logs),
+        ("Prefix Configuration Manager...", open_prefix_manager_dialog)]),
+    ("WINE", [
+        ("Wine Configuration (winecfg)", open_winecfg),
+        ("Open Wine Prefix Folder", open_wine_prefix_folder),
+        ("Uninstall Program", lambda: subprocess.Popen(["wine", "uninstaller"])),
+        ("Wine Explorer", lambda: subprocess.Popen(["wine", "explorer"]))]),
+    ("PROTON GE", [
+        ("Extract Proton GE Archive...", extract_protonge_archive),
+        ("Download ProtonGE Online...", open_protonge_download_dialog),
+        ("Open Proton GE Folder", open_protonge_folder)]),
+    ("PROTON-CACHYOS", [
+        ("Extract Proton-CachyOS Archive...", extract_protoncachyos_archive),
+        ("Download Proton-CachyOS Online...", open_protoncachyos_download_dialog),
+        ("Open Proton-CachyOS Folder", open_protoncachyos_folder)]),
+    ("LIBRARY", [
+        ("Refresh List", lambda: update_script_list())]),
+]
+
+for _i, (_section, _items) in enumerate(SIDE_MENU):
+    ttk.Label(side_inner, text=_section, style="SideSection.TLabel").pack(
+        anchor="w", padx=16, pady=(8 if _i == 0 else 16, 4))
+    for _label, _cmd in _items:
+        ttk.Button(side_inner, text=_label, style="Sidebar.TButton", takefocus=False,
+                   command=lambda c=_cmd: _side_run(c)).pack(fill=tk.X)
+ttk.Frame(side_inner, style="Side.TFrame", height=12).pack(fill=tk.X)
+ttk.Separator(side_inner, orient=tk.HORIZONTAL, style="Side.TSeparator").pack(fill=tk.X, padx=16, pady=(4, 8))
+ttk.Label(side_inner, text=f"Wine Launch Manager  v{WLM_VERSION}", style="SideMuted.TLabel").pack(anchor="w", padx=16)
+ttk.Label(side_inner, text=WLM_DEVELOPER, style="SideMuted.TLabel").pack(anchor="w", padx=16, pady=(2, 0))
+ttk.Frame(side_inner, style="Side.TFrame", height=14).pack(fill=tk.X)
+
+def _side_wheel(event):
+    if side_scroll.winfo_ismapped():
+        up = getattr(event, "num", 0) == 4 or getattr(event, "delta", 0) > 0
+        side_canvas.yview_scroll(-2 if up else 2, "units")
+    return "break"
+
+def _side_bind_wheel(widget):
+    for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        widget.bind(seq, _side_wheel, add="+")
+    for child in widget.winfo_children():
+        _side_bind_wheel(child)
+
+_side_bind_wheel(side_panel)
+
+def _side_click_outside(event):
+    """Klik di luar panel (dan bukan tombol hamburger) menutup panel."""
+    if not _side["open"]:
         return
-    settings_menu.post(settings_btn.winfo_rootx(),
-                        settings_btn.winfo_rooty() + settings_btn.winfo_height() + 5)
+    w = event.widget
+    if not isinstance(w, tk.Misc):
+        return
+    try:
+        if w.winfo_toplevel() is not root:
+            return
+        path = str(w)
+    except tk.TclError:
+        return
+    panel_path = str(side_panel)
+    if path == str(menu_btn) or path == panel_path or path.startswith(panel_path + "."):
+        return
+    hide_side_panel()
 
-settings_btn.config(command=toggle_settings_menu)
+root.bind_all("<Button-1>", _side_click_outside, add="+")
+root.bind("<Escape>", lambda e: hide_side_panel(), add="+")
+menu_btn.config(command=toggle_side_panel)
 
 main_container = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
-main_container.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 15))
+main_container.pack(fill=tk.BOTH, expand=True, padx=16, pady=(6, 14))
 
-left_panel = ttk.Frame(main_container, padding=(0, 0, 10, 0)) 
+left_panel = ttk.Frame(main_container, padding=(0, 0, 12, 0))
 main_container.add(left_panel, weight=3)
 
+# --- Tampilan library: Grid (kartu cover ala GOG) atau List (daftar teks) ---------------------
+try:
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import game_covers
+except ImportError as e:
+    game_covers = None
+    print(f"[WLM] game_covers.py not found next to the launcher - grid view disabled: {e}")
+
+view_config = (game_covers.load_view_config(library_view_config_file) if game_covers
+               else {"view": "list", "card_width": 200})
+
+# --- baris judul library: "Library · 12 games" ........ Sort [A-Z] [Grid|List] ----------------
 controls_frame = ttk.Frame(left_panel)
-controls_frame.pack(fill=tk.X, pady=(0, 8))
+controls_frame.pack(fill=tk.X, pady=(0, 10))
 
-sort_label = ttk.Label(controls_frame, text="Sort:", font=FONTS["normal"])
-sort_label.pack(side=tk.LEFT, padx=(0, 5))
+ttk.Label(controls_frame, text="Library", style="Heading.TLabel").pack(side=tk.LEFT)
+count_label = ttk.Label(controls_frame, text="", style="Muted.TLabel")
+count_label.pack(side=tk.LEFT, padx=(10, 0), pady=(3, 0))
 
-sort_combo = ttk.Combobox(controls_frame, 
-                            values=["A-Z", "Z-A"], 
+if game_covers:
+    view_toggle = ttk.Frame(controls_frame)
+    view_toggle.pack(side=tk.RIGHT)
+    view_grid_btn = ttk.Button(view_toggle, text="Grid", style="SegOff.TButton", takefocus=False,
+                               command=lambda: apply_view("grid"))
+    view_grid_btn.pack(side=tk.LEFT, padx=(0, 8))
+    view_list_btn = ttk.Button(view_toggle, text="List", style="SegOff.TButton", takefocus=False,
+                               command=lambda: apply_view("list"))
+    view_list_btn.pack(side=tk.LEFT)
+
+sort_combo = ttk.Combobox(controls_frame,
+                            values=["A-Z", "Z-A"],
                             state="readonly",
-                            width=8,
+                            width=6,
                             font=FONTS["normal"])
 sort_combo.current(0)
-sort_combo.pack(side=tk.LEFT, padx=(0, 15))
+sort_combo.pack(side=tk.RIGHT, padx=(0, 12 if game_covers else 0))
+sort_label = ttk.Label(controls_frame, text="Sort", style="Muted.TLabel")
+sort_label.pack(side=tk.RIGHT, padx=(0, 6))
 sort_combo.bind("<<ComboboxSelected>>", sort_by_selected)
 
-launch_label = ttk.Label(controls_frame, text="Launch Mode:", font=FONTS["normal"])
-launch_label.pack(side=tk.LEFT, padx=(0, 5))
+# Baris kedua (hanya tampil di mode Grid): ukuran kartu + ambil cover.
+view_frame = ttk.Frame(left_panel)
 
-launch_mode_combo = ttk.Combobox(controls_frame,
-                                    values=["Normal", "GalliumHUD", "VulkanHUD", "MangoHud-GL", "Mangohud"],
-                                    state="readonly",
-                                    width=12,
-                                    font=FONTS["normal"])
-launch_mode_combo.current(0)
-launch_mode_combo.pack(side=tk.LEFT)
-
-hud_config_btn = ttk.Button(controls_frame, text="Config HUD", style="Custom.TButton",
-                             command=open_hud_config_dialog)
-hud_config_btn.pack(side=tk.LEFT, padx=(8, 0))
-all_buttons.append(hud_config_btn)
-
-tree_frame = ttk.Frame(left_panel)
-tree_frame.pack(fill=tk.BOTH, expand=True)
+# --- daftar teks (List) dalam bingkai tipis -----------------------------------------------------
+tree_frame = tk.Frame(left_panel, bd=0, highlightthickness=1)
 
 tree_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
 tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
 tree = ttk.Treeview(tree_frame,
-                    columns=("No", "Game Name"),
+                    columns=("No", "Game Name", "Source"),
                     show="headings",
                     yscrollcommand=tree_scroll.set,
                     selectmode="browse")
 tree_scroll.config(command=tree.yview)
 
-tree.heading("No", text="No", anchor="center")
-tree.heading("Game Name", text="GAME NAME", anchor="w")
+tree.heading("No", text="#", anchor="center")
+tree.heading("Game Name", text="GAME", anchor="w")
+tree.heading("Source", text="SOURCE", anchor="center")
 tree.column("#0", width=0, stretch=False)
-tree.column("No", width=40, anchor="center", minwidth=40, stretch=False)
+tree.column("No", width=48, anchor="center", minwidth=40, stretch=False)
 tree.column("Game Name", width=300, anchor="w", minwidth=200, stretch=True)
+tree.column("Source", width=90, anchor="center", minwidth=70, stretch=False)
 
 tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+_last_tree_click = {"time": 0.0, "row": None}
+
+def _play_selected(event=None):
+    run_script()
+    reset_button_hover_state(play_btn)
+
 def on_tree_click(event):
-    """Clicking an already-selected game a second time deselects it,
-    instead of doing nothing (ttk.Treeview's default with selectmode='browse')."""
+    """Klik dua kali cepat pada game = langsung Play. Klik sekali pada game yang sudah terpilih
+    membatalkan pilihan, instead of doing nothing (ttk.Treeview's default with selectmode='browse')."""
     row_id = tree.identify_row(event.y)
     if not row_id:
         return
+    now = time.monotonic()
+    is_double = (row_id == _last_tree_click["row"] and now - _last_tree_click["time"] < 0.35)
+    _last_tree_click["time"], _last_tree_click["row"] = now, row_id
+    if is_double:
+        _last_tree_click["row"] = None
+        tree.selection_set(row_id)
+        tree.focus(row_id)
+        root.after(10, _play_selected)
+        return "break"
     if row_id in tree.selection():
         tree.selection_remove(row_id)
         tree.focus('')
@@ -4892,70 +6265,266 @@ def on_tree_click(event):
 
 tree.bind("<Button-1>", on_tree_click)
 tree.bind("<<TreeviewSelect>>", on_select)
+tree.bind("<Return>", _play_selected)
 
-right_panel = ttk.Frame(main_container, padding=15)
+# Pesan di tengah area daftar: library kosong / hasil pencarian kosong.
+empty_label = tk.Label(left_panel, text="", font=FONTS["subtitle"], justify=tk.CENTER, bd=0)
+
+def _sync_empty_bg():
+    """Latar tulisan kosong disamakan dengan area di bawahnya: mode List = warna tabel
+    (tree_bg), mode Grid = warna panel. Sebelumnya selalu 'primary' sehingga di mode List
+    tampak seperti kotak berbeda warna di atas tabel."""
+    bg = COLORS["tree_bg"] if view_config.get("view") == "list" else COLORS["primary"]
+    try:
+        empty_label.config(bg=bg)
+    except tk.TclError:
+        pass
+
+def set_empty_state(message):
+    _sync_empty_bg()
+    if message:
+        empty_label.config(text=message)
+        empty_label.place(relx=0.5, rely=0.5, anchor="center")
+        empty_label.lift()
+    else:
+        empty_label.place_forget()
+
+def _grid_select(name):
+    """Kartu diklik -> pilih baris yang sama di Treeview, supaya PLAY/RENAME/dll tetap jalan."""
+    for iid in tree.get_children():
+        if tree.item(iid, "values")[1] == name:
+            tree.selection_set(iid)
+            tree.focus(iid)
+            tree.see(iid)
+            break
+
+def _grid_deselect():
+    sel = tree.selection()
+    if sel:
+        tree.selection_remove(*sel)
+    tree.focus('')
+    on_select()
+
+def _grid_activate(name):
+    run_script()
+    reset_button_hover_state(play_btn)
+
+def _save_view_config():
+    if game_covers:
+        game_covers.save_view_config(library_view_config_file, view_config)
+
+def apply_view(mode):
+    """Tampilkan Grid (cover) atau List (teks); pilihan disimpan."""
+    if mode == "grid" and library_grid is None:
+        mode = "list"
+    view_config["view"] = mode
+    tree_frame.pack_forget()
+    if library_grid is not None:
+        library_grid.pack_forget()
+    view_frame.pack_forget()
+    if game_covers:
+        view_grid_btn.configure(style="SegOn.TButton" if mode == "grid" else "SegOff.TButton")
+        view_list_btn.configure(style="SegOn.TButton" if mode == "list" else "SegOff.TButton")
+    if mode == "grid":
+        view_frame.pack(fill=tk.X, pady=(0, 10), after=controls_frame)
+        library_grid.pack(fill=tk.BOTH, expand=True)
+    else:
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+    _save_view_config()
+    _sync_empty_bg()
+    if empty_label.winfo_ismapped():
+        empty_label.lift()
+
+def on_size_selected(event=None):
+    width = game_covers.CARD_SIZES.get(size_combo.get())
+    if width and library_grid is not None:
+        view_config["card_width"] = width
+        library_grid.set_card_width(width)
+        _save_view_config()
+
+def fetch_covers():
+    """Cari cover untuk semua game yang belum punya (perlu internet)."""
+    if library_grid is None:
+        return
+    n = library_grid.fetch_missing()
+    safe_status_config(text=(f"Looking for {n} cover(s) online..." if n
+                             else "All games already have a cover"),
+                       fg=COLORS["text_secondary"])
+
+if game_covers:
+    cover_store = game_covers.CoverStore(directory)
+    library_grid = game_covers.LibraryGrid(
+        left_panel, lambda: COLORS, FONTS, icon_dir, cover_store, view_config["card_width"],
+        on_select=_grid_select, on_deselect=_grid_deselect, on_activate=_grid_activate,
+        source_of=lambda name: game_source(name)["source"],
+        on_status=lambda text, level="info": safe_status_config(
+            text=text, fg=COLORS["text_secondary" if level == "info" else level]))
+
+    ttk.Label(view_frame, text="Card size", style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+    size_combo = ttk.Combobox(view_frame, values=list(game_covers.CARD_SIZES), state="readonly",
+                              width=8, font=FONTS["normal"])
+    size_combo.set(next((k for k, v in game_covers.CARD_SIZES.items()
+                         if v == view_config["card_width"]), "Medium"))
+    size_combo.pack(side=tk.LEFT, padx=(0, 10))
+    size_combo.bind("<<ComboboxSelected>>", on_size_selected)
+
+    fetch_covers_btn = make_button(view_frame, "Fetch Covers", fetch_covers)
+    fetch_covers_btn.pack(side=tk.LEFT)
+
+apply_view(view_config["view"])
+
+# =========================================================================== panel kanan: detail game + aksi
+right_panel = ttk.Frame(main_container, padding=(4, 0, 0, 0))
 main_container.add(right_panel, weight=1)
 
-button_panel = ttk.Frame(right_panel, padding=(0, 10))
-button_panel.pack(fill=tk.X, side=tk.BOTTOM)
+# Bagian bawah dipasang DULU (side=BOTTOM) supaya tombol selalu terlihat walau jendela pendek.
+button_panel = ttk.Frame(right_panel)
+button_panel.pack(fill=tk.X, side=tk.BOTTOM, pady=(12, 0))
 
-icon_frame = ttk.Frame(right_panel, width=ICON_WIDTH, height=ICON_HEIGHT)
-icon_frame.pack(pady=(0, 10))
-icon_frame.pack_propagate(False) 
+launch_row = ttk.Frame(button_panel)
+launch_row.pack(fill=tk.X)
 
-icon_label = tk.Label(icon_frame, relief="flat")
+launch_label = ttk.Label(launch_row, text="Launch", style="Muted.TLabel")
+launch_label.pack(side=tk.LEFT)
+
+hud_config_btn = make_button(launch_row, "Config HUD", open_hud_config_dialog, "Action.TButton")
+hud_config_btn.pack(side=tk.RIGHT)
+
+launch_mode_combo = ttk.Combobox(launch_row,
+                                    values=["Normal", "GalliumHUD", "VulkanHUD", "MangoHud-GL", "Mangohud"],
+                                    state="readonly",
+                                    width=12,
+                                    font=FONTS["normal"])
+launch_mode_combo.current(0)
+launch_mode_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+
+play_btn = make_button(button_panel, "\u25B6  Play",
+                       lambda: (run_script(), reset_button_hover_state(play_btn)),
+                       "Play.TButton")
+play_btn.pack(fill=tk.X, pady=(10, 8))
+
+action_row = ttk.Frame(button_panel)
+action_row.pack(fill=tk.X)
+for _col in range(4):
+    action_row.columnconfigure(_col, weight=1, uniform="actions")
+
+rename_btn = make_button(action_row, "Rename", rename_script, "Action.TButton")
+rename_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+icon_btn = make_button(action_row, "Icon", change_icon, "Action.TButton")
+icon_btn.grid(row=0, column=1, sticky="ew", padx=(0, 6))
+
+filemanager_btn = make_button(action_row, "Folder", open_file_manager, "Action.TButton")
+filemanager_btn.grid(row=0, column=2, sticky="ew", padx=(0, 6))
+
+remove_btn = make_button(action_row, "Remove", remove_script, "Danger.TButton")
+remove_btn.grid(row=0, column=3, sticky="ew")
+
+_ACTION_BUTTONS = (play_btn, rename_btn, icon_btn, filemanager_btn, remove_btn)
+
+def _sync_action_buttons(has_selection):
+    """Tombol yang butuh game terpilih dinonaktifkan kalau belum ada pilihan."""
+    for btn in _ACTION_BUTTONS:
+        try:
+            btn.state(["!disabled"] if has_selection else ["disabled"])
+        except tk.TclError:
+            pass
+
+# --- kartu detail: cover, judul, info ----------------------------------------------------------
+detail_card = tk.Frame(right_panel, bd=0, highlightthickness=1)
+detail_card.pack(fill=tk.X, side=tk.TOP)
+
+icon_frame = ttk.Frame(detail_card, style="Card.TFrame", width=ICON_WIDTH, height=ICON_HEIGHT)
+icon_frame.pack(padx=16, pady=(16, 10))
+icon_frame.pack_propagate(False)
+
+icon_label = tk.Label(icon_frame, relief="flat", bd=0, text="No cover", font=FONTS["small"])
 icon_label.pack(expand=True, fill=tk.BOTH)
 
-game_title_label = tk.Label(right_panel,
+game_title_label = tk.Label(detail_card,
                                 text="No Game Selected",
-                                font=FONTS["subtitle"],
+                                font=FONTS["heading"],
                                 justify=tk.CENTER,
-                                wraplength=ICON_WIDTH) 
-game_title_label.pack(pady=(0, 8))
+                                wraplength=ICON_WIDTH,
+                                bd=0)
+game_title_label.pack(fill=tk.X, padx=16, pady=(0, 8))
 
+# info_text tetap dipakai kode lain (on_select dst.). Isi "Source: ...\nLocation: ..." otomatis
+# ditampilkan sebagai baris label/nilai; teks biasa (mis. "Select a game...") tampil sebagai pesan.
 info_text = tk.StringVar(value="Select a game to view details")
-info_label = tk.Label(right_panel,
+info_label = tk.Label(detail_card,
                         textvariable=info_text,
                         font=FONTS["small"],
-                        justify=tk.LEFT,
-                        wraplength=ICON_WIDTH + 50) 
-info_label.pack(pady=(0, 10))
+                        justify=tk.CENTER,
+                        wraplength=ICON_WIDTH,
+                        bd=0)
+info_label.pack(padx=16, pady=(0, 16))
 
-btn_row1 = ttk.Frame(button_panel)
-btn_row1.pack(pady=3)
+INFO_ROWS = (("Source", "Source"), ("Location", "Location"),
+             ("Last Modified", "Modified"), ("Size", "Size"))
+info_rows_frame = ttk.Frame(detail_card, style="Card.TFrame")
+info_rows_frame.columnconfigure(1, weight=1)
+_info_value_labels = {}
+for _row, (_key, _caption) in enumerate(INFO_ROWS):
+    ttk.Label(info_rows_frame, text=_caption, style="CardMuted.TLabel").grid(
+        row=_row, column=0, sticky="nw", padx=(0, 10), pady=2)
+    _value_label = ttk.Label(info_rows_frame, text="", style="Card.TLabel", justify=tk.LEFT,
+                             wraplength=170)
+    _value_label.grid(row=_row, column=1, sticky="nw", pady=2)
+    _info_value_labels[_key] = _value_label
 
-play_btn = ttk.Button(btn_row1, text="▶ PLAY",
-                       command=lambda: (run_script(), reset_button_hover_state(play_btn)),
-                       style="Custom.TButton", width=12)
-all_buttons.append(play_btn)
-play_btn.grid(row=0, column=0, padx=3, pady=3)
+def _render_info(*_):
+    parsed = {}
+    for line in info_text.get().split("\n"):
+        if ": " in line:
+            key, value = line.split(": ", 1)
+            parsed[key.strip()] = value.strip()
+    if "Source" in parsed and "Location" in parsed:
+        info_label.pack_forget()
+        for key, label in _info_value_labels.items():
+            label.configure(text=parsed.get(key, "-"))
+        if not info_rows_frame.winfo_manager():
+            info_rows_frame.pack(fill=tk.X, padx=16, pady=(0, 16))
+    else:
+        info_rows_frame.pack_forget()
+        if not info_label.winfo_manager():
+            info_label.pack(padx=16, pady=(0, 16))
 
-add_btn = ttk.Button(btn_row1, text="+ ADD", command=add_script, style="Custom.TButton", width=12)
-all_buttons.append(add_btn)
-add_btn.grid(row=0, column=1, padx=3, pady=3)
+info_text.trace_add("write", _render_info)
 
-remove_btn = ttk.Button(btn_row1, text="REMOVE", command=remove_script, style="Custom.TButton", width=12)
-all_buttons.append(remove_btn)
-remove_btn.grid(row=0, column=2, padx=3, pady=3)
+def _resize_detail_card(event):
+    inner = max(120, event.width - 34)
+    game_title_label.configure(wraplength=inner)
+    info_label.configure(wraplength=inner)
+    for label in _info_value_labels.values():
+        label.configure(wraplength=max(80, inner - 72))
 
-btn_row2 = ttk.Frame(button_panel)
-btn_row2.pack(pady=3)
+detail_card.bind("<Configure>", _resize_detail_card)
 
-rename_btn = ttk.Button(btn_row2, text="RENAME", command=rename_script, style="Custom.TButton", width=12)
-all_buttons.append(rename_btn)
-rename_btn.grid(row=0, column=0, padx=3, pady=3)
+_sync_action_buttons(False)
 
-icon_btn = ttk.Button(btn_row2, text="ICON", command=change_icon, style="Custom.TButton", width=12)
-all_buttons.append(icon_btn)
-icon_btn.grid(row=0, column=1, padx=3, pady=3)
-
-filemanager_btn = ttk.Button(btn_row2, text="FOLDER", command=open_file_manager, style="Custom.TButton", width=12)
-all_buttons.append(filemanager_btn)
-filemanager_btn.grid(row=0, column=2, padx=3, pady=3)
-
-apply_theme(CURRENT_THEME)
+apply_theme(CURRENT_THEME, announce=False)
 
 update_script_list()
+
+def _restore_sash(_attempt=0):
+    """Kembalikan lebar panel library/detail yang tersimpan (dijaga agar kedua panel tetap terlihat)."""
+    saved = config.get("sash")
+    if saved:
+        try:
+            root.update_idletasks()
+            total = main_container.winfo_width()
+            if total < 200 and _attempt < 10:
+                root.after(100, _restore_sash, _attempt + 1)
+                return
+            main_container.sashpos(0, max(300, min(saved, total - 300)))
+        except tk.TclError:
+            pass
+    _sash_state["restored"] = True
+
+root.after(200, _restore_sash)
+root.after(800, _restore_sash)      # ulangi sekali: window maximize bisa baru selesai belakangan
+main_container.bind("<ButtonRelease-1>", lambda e: _save_window_config_debounced(), add="+")
 
 root.after(150, poll_log_queues)
 

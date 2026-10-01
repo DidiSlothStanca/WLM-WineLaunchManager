@@ -1,0 +1,11 @@
+# Wine Launch Manager - environment configuration
+# URLs used by the "Download Online" feature to check for and fetch new
+# Proton GE / Proton-CachyOS builds. Edit and save, then restart WLM (or
+# reopen the Download Online dialog) to apply changes.
+
+proton_ge:
+  releases_api: https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases
+  releases_page: https://github.com/GloriousEggroll/proton-ge-custom/releases
+proton_cachyos:
+  releases_api: https://api.github.com/repos/CachyOS/proton-cachyos/releases
+  releases_page: https://github.com/CachyOS/proton-cachyos/releases
