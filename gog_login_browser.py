@@ -20,7 +20,10 @@ Login Google / Facebook / Steam / Xbox di dalam jendela ini:
   4. ANTI LAYAR PUTIH (GTK): cookie pihak ketiga diizinkan, ITP mati, proses web yang crash
      di-reload, semua navigasi dicegat lewat 'decide-policy' sehingga 'code=' tertangkap
      walau halaman tujuannya putih, dan jendela induk yang macet di gog.com dimuat ulang.
-  5. RENDERING SOFTWARE (tanpa GPU/Vulkan): set WLM_GOG_KEEP_GPU=1 untuk mematikan tweak ini.
+  5. PROFIL RENDERING: software (tanpa GPU/Vulkan, bawaan) -> nodmabuf -> gpu. Kalau tampilan
+     polos satu warna (dicek lewat snapshot WebKit, bukan hanya teks DOM) jendela diulang dengan
+     profil berikutnya. Paksa satu profil: WLM_GOG_RENDER=software|nodmabuf|gpu (atau --render);
+     WLM_GOG_KEEP_GPU=1 sama dengan 'gpu'.
   6. LOG: semua URL + hasil 'probe' halaman (code/token disamarkan) ditulis ke
      <tmp>/wlm_gog_login.log (Linux: /tmp/wlm_gog_login.log). WLM_GOG_DEBUG=1 -> juga ke stderr.
 
@@ -47,16 +50,47 @@ import threading
 import time
 import urllib.parse
 
-# Anti layar putih / tanpa GPU. Harus di-set SEBELUM webview/WebKit/Qt di-import.
-NO_GPU = not os.environ.get("WLM_GOG_KEEP_GPU")
-if NO_GPU:
-    os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
-    os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
-    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
-    os.environ.setdefault("GALLIUM_DRIVER", "llvmpipe")
-    os.environ.setdefault("QT_QUICK_BACKEND", "software")
-    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS",
-                          "--disable-gpu --disable-gpu-compositing --disable-features=Vulkan")
+# Profil rendering (anti layar putih). Harus di-set SEBELUM webview/WebKit/Qt di-import.
+#   software = tanpa GPU sama sekali; nodmabuf = hanya matikan DMABUF; gpu = bawaan sistem.
+_ENV_SET = []      # variabel yang kita isi sendiri (dibuang lagi untuk percobaan ulang)
+
+def _setenv_default(key, value):
+    if key not in os.environ:
+        os.environ[key] = value
+        _ENV_SET.append(key)
+
+RENDER_PROFILES = {
+    "software": {
+        "WEBKIT_DISABLE_COMPOSITING_MODE": "1",
+        "WEBKIT_DISABLE_DMABUF_RENDERER": "1",
+        "LIBGL_ALWAYS_SOFTWARE": "1",
+        "GALLIUM_DRIVER": "llvmpipe",
+        "QT_QUICK_BACKEND": "software",
+        "QTWEBENGINE_CHROMIUM_FLAGS": "--disable-gpu --disable-gpu-compositing --disable-features=Vulkan",
+    },
+    "nodmabuf": {"WEBKIT_DISABLE_DMABUF_RENDERER": "1"},
+    "gpu": {},
+}
+RENDER_ORDER = ("software", "nodmabuf", "gpu")
+
+
+def _pre_render():
+    argv = sys.argv
+    for i, a in enumerate(argv):
+        if a == "--render" and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith("--render="):
+            return a.split("=", 1)[1]
+    return None
+
+
+RENDER = (_pre_render() or os.environ.get("WLM_GOG_RENDER")
+          or ("gpu" if os.environ.get("WLM_GOG_KEEP_GPU") else "software"))
+if RENDER not in RENDER_PROFILES:
+    RENDER = "software"
+NO_GPU = RENDER == "software"
+for _k, _v in RENDER_PROFILES[RENDER].items():
+    _setenv_default(_k, _v)
 
 UA_PROFILES = {
     "safari": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 "
@@ -202,6 +236,66 @@ def find_native(window):
         if inst:
             return inst.get(uid) or next(iter(inst.values()), None)
     return None
+
+
+def _is_uniform(data, w, h, stride):
+    """True kalau hampir semua piksel (contoh tiap 4 px) berwarna sama - halaman login asli selalu
+    punya teks/logo/tombol, jadi tidak akan lolos ambang ini."""
+    if w <= 0 or h <= 0:
+        return None
+    counts, total = {}, 0
+    for y in range(0, h, 4):
+        row = y * stride
+        for x in range(0, w, 4):
+            off = row + x * 4
+            px = tuple(v >> 3 for v in data[off:off + 4])
+            counts[px] = counts.get(px, 0) + 1
+            total += 1
+    if total < 500:
+        return None
+    return max(counts.values()) / total >= 0.998
+
+
+def snapshot_blank(native, timeout=4.0):
+    """True = tampilan WebKit polos satu warna (mis. putih walau DOM berisi), False = ada isinya,
+    None = tidak bisa diperiksa. Mendeteksi layar putih akibat rendering yang rusak."""
+    view = getattr(native, "webview", None)
+    if view is None or not hasattr(view, "get_snapshot"):
+        return None
+    try:
+        from gi.repository import GLib
+        WebKit2 = sys.modules.get("gi.repository.WebKit2")
+        if WebKit2 is None:
+            from gi.repository import WebKit2
+    except Exception as e:
+        log(f"snapshot: gi/WebKit2 tidak tersedia: {e}")
+        return None
+    box = {"result": None}
+    done = threading.Event()
+
+    def finish(source, res, _data=None):
+        try:
+            surface = source.get_snapshot_finish(res)
+            surface.flush()
+            box["result"] = _is_uniform(bytes(surface.get_data()), surface.get_width(),
+                                        surface.get_height(), surface.get_stride())
+        except Exception as e:
+            log(f"snapshot gagal: {e}")
+        finally:
+            done.set()
+
+    def start():
+        try:
+            view.get_snapshot(WebKit2.SnapshotRegion.VISIBLE, WebKit2.SnapshotOptions.NONE,
+                              None, finish, None)
+        except Exception as e:
+            log(f"snapshot tidak bisa dimulai: {e}")
+            done.set()
+        return False
+
+    GLib.idle_add(start)
+    done.wait(timeout)
+    return box["result"]
 
 
 def install_gtk_popups(native, on_url, is_done, main_url):
@@ -429,11 +523,17 @@ def main():
     ap.add_argument("--height", type=int, default=0, help="0 = otomatis (muat di layar)")
     ap.add_argument("--ua", default="auto", choices=["auto"] + sorted(UA_PROFILES))
     ap.add_argument("--tried", default="", help="(internal) daftar UA yang sudah dicoba")
+    ap.add_argument("--render", default="", choices=[""] + sorted(RENDER_PROFILES),
+                    help="profil rendering (default: software)")
+    ap.add_argument("--render-tried", default="", help="(internal) daftar profil rendering yang sudah dicoba")
     ap.add_argument("--no-retry", action="store_true",
                     help="jangan ulangi dengan UA lain jika diblokir/putih")
     args = ap.parse_args()
 
     tried = [t for t in args.tried.split(",") if t]
+    tried_r = [t for t in args.render_tried.split(",") if t]
+    if RENDER not in tried_r:
+        tried_r.append(RENDER)
     try:
         _log_fh = open(LOG_PATH, "a" if tried else "w", encoding="utf-8")
     except Exception:
@@ -444,7 +544,8 @@ def main():
     ua_name = order[0] if args.ua == "auto" else args.ua
     if ua_name not in tried:
         tried.append(ua_name)
-    log(f"=== mulai (backend~{backend}, ua={ua_name}, tried={tried}) === log: {LOG_PATH}")
+    log(f"=== mulai (backend~{backend}, ua={ua_name}, render={RENDER}, tried={tried}, "
+        f"render_tried={tried_r}) === log: {LOG_PATH}")
 
     try:
         import webview
@@ -517,6 +618,7 @@ def main():
 
         last_url, last_inject = None, 0.0
         url_since, last_probe, probed = time.time(), 0.0, set()
+        last_snap, snap_ok, snap_tries, blank_hits = 0.0, set(), {}, 0
         while not state["closed"] and not state["code"] and not state["blocked"] and not state["blank"]:
             try:
                 url = window.get_current_url() or ""
@@ -554,6 +656,25 @@ def main():
                             return
                 else:
                     probed.add(url)  # evaluate_js gagal: jangan diulang terus
+
+            # Layar putih karena render rusak: DOM berisi teks tapi yang tergambar polos.
+            if (state["popups"] is True and native is not None and url and not url.startswith("about:")
+                    and args.watch not in path and url not in snap_ok
+                    and now - url_since >= 10 and now - last_snap >= 4):
+                last_snap = now
+                snap_tries[url] = snap_tries.get(url, 0) + 1
+                blank_now = snapshot_blank(native)
+                log(f"snapshot polos? {blank_now}")
+                if blank_now is False or snap_tries[url] >= 6:
+                    snap_ok.add(url)
+                    blank_hits = 0
+                elif blank_now is True:
+                    blank_hits += 1
+                    if blank_hits >= 2:
+                        state["blank"] = True
+                        log("TAMPILAN POLOS (render rusak) -> menutup jendela")
+                        close_window()
+                        return
             time.sleep(0.3)
 
     try:
@@ -570,15 +691,21 @@ def main():
     elif state["blocked"] or state["blank"]:
         why = "diblokir" if state["blocked"] else "halaman putih"
         nxt = next((u for u in order if u not in tried), None)
-        if nxt and not args.no_retry:
-            log(f"{why} -> mengulang dengan UA {nxt}")
+        nxt_r = None if state["blocked"] else next((r for r in RENDER_ORDER if r not in tried_r), None)
+        if (nxt or nxt_r) and not args.no_retry:
+            use_ua, use_r = nxt or ua_name, nxt_r or RENDER
+            log(f"{why} -> mengulang dengan UA {use_ua}, render {use_r}")
             # pywebview tidak bisa start dua kali dalam satu proses -> ulangi sebagai proses baru
             cmd = [sys.executable, os.path.abspath(__file__), args.url,
                    "--watch", args.watch, "--title", args.title,
                    "--width", str(args.width), "--height", str(args.height),
-                   "--ua", nxt, "--tried", ",".join(tried)]
+                   "--ua", use_ua, "--tried", ",".join(tried),
+                   "--render", use_r, "--render-tried", ",".join(tried_r)]
+            env = os.environ.copy()
+            for k in _ENV_SET:      # biarkan proses baru menyetel profilnya sendiri
+                env.pop(k, None)
             try:
-                r = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+                r = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, env=env)
                 lines = r.stdout.strip().splitlines()
                 if lines:
                     sys.stdout.write(lines[-1] + "\n")
@@ -596,4 +723,4 @@ def main():
 if __name__ == "__main__":
     code = main()
     sys.stdout.flush()
-    os._exit(code or 0)  # pastikan thread watcher tidak menahan proses tetap hidup
+    os._exit(code or 0) 

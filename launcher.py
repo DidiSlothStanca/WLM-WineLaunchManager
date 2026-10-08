@@ -50,6 +50,7 @@ icon_dir = directory / "icons"
 bashlaunch_dir = directory / "bashlaunch"
 theme_config_file = directory / "theme_config.json"
 window_config_file = directory / "window_config.json"
+dialog_sizes_file = directory / "dialog_sizes.json"   # ukuran terakhir dialog yang bisa di-resize
 
 protonge_dir = directory / "protonge"
 protonge_prefix_root = directory / "protonprefixes"
@@ -498,6 +499,115 @@ def save_window_config():
                 json.dump(config_data, f, indent=4)
         except Exception as e:
             print(f"Error saving window config: {e}")
+
+_DIALOG_SIZE_RE = re.compile(r"(\d{3,5})x(\d{3,5})")
+
+def load_dialog_size(key):
+    """Ukuran (lebar, tinggi) yang tersimpan untuk dialog `key`, atau None kalau belum ada / rusak."""
+    try:
+        with open(dialog_sizes_file, 'r') as f:
+            value = json.load(f).get(key)
+    except Exception:
+        return None
+    m = _DIALOG_SIZE_RE.fullmatch(value) if isinstance(value, str) else None
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+def save_dialog_size(key, width, height):
+    """Simpan ukuran dialog `key` (file ditulis atomik supaya tidak rusak kalau launcher mati mendadak)."""
+    data = {}
+    try:
+        with open(dialog_sizes_file, 'r') as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            data = loaded
+    except Exception:
+        pass
+    data[key] = f"{int(width)}x{int(height)}"
+    tmp = dialog_sizes_file.with_name(dialog_sizes_file.name + ".tmp")
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(data, f, indent=4)
+        os.replace(tmp, dialog_sizes_file)
+    except Exception as e:
+        print(f"Error saving dialog size: {e}")
+
+def remember_dialog_size(dialog, key, default_size, min_size=(0, 0), parent=None):
+    """Pasang ukuran awal dialog = ukuran yang terakhir diatur pengguna (atau `default_size` kalau
+    belum pernah), dijaga tidak lebih kecil dari `min_size` dan tidak lebih besar dari layar, lalu
+    SIMPAN OTOMATIS setiap kali dialog di-resize (ditunda 0,5 dtk, dan tetap tersimpan kalau dialog
+    langsung ditutup). Dialog ditaruh di tengah `parent`. Kembalian: (lebar, tinggi) yang dipakai.
+    Panggil SEBELUM dialog.deiconify()."""
+    sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
+    max_w, max_h = max(320, sw - 20), max(240, sh - 90)     # sisakan title bar + taskbar
+    min_w, min_h = min(min_size[0], max_w), min(min_size[1], max_h)
+    want_w, want_h = load_dialog_size(key) or default_size
+    w, h = max(min_w, min(want_w, max_w)), max(min_h, min(want_h, max_h))
+
+    dialog.minsize(min_w, min_h)
+    dialog.geometry(f"{w}x{h}")
+
+    def center():
+        try:
+            if not dialog.winfo_exists():
+                return
+            cw, ch = (dialog.winfo_width(), dialog.winfo_height())
+            cw, ch = (cw, ch) if cw > 1 and ch > 1 else (w, h)
+            if parent is not None and parent.winfo_exists():
+                cx = parent.winfo_rootx() + parent.winfo_width() // 2
+                cy = parent.winfo_rooty() + parent.winfo_height() // 2
+            else:
+                cx, cy = sw // 2, sh // 2
+            x = max(0, min(cx - cw // 2, sw - cw - 10))
+            y = max(10, min(cy - ch // 2, sh - ch - 70))
+            dialog.geometry(f"+{x}+{y}")
+        except tk.TclError:
+            pass
+
+    center()
+    # Window manager sering menggeser dialog saat ditampilkan -> tengahkan lagi sebentar kemudian.
+    for delay in (30, 150, 400):
+        dialog.after(delay, center)
+
+    state = {"ready": False, "size": (w, h), "job": None}
+
+    def persist():
+        state["job"] = None
+        if state["ready"]:
+            save_dialog_size(key, *state["size"])
+
+    def arm():
+        # Perubahan ukuran akibat window manager saat dialog baru tampil BUKAN resize dari pengguna.
+        try:
+            if dialog.winfo_exists():
+                cw, ch = dialog.winfo_width(), dialog.winfo_height()
+                if cw > 1 and ch > 1:
+                    state["size"] = (cw, ch)
+                state["ready"] = True
+        except tk.TclError:
+            pass
+
+    def on_configure(event):
+        if event.widget is not dialog or not state["ready"]:
+            return
+        size = (event.width, event.height)
+        if size == state["size"] or size[0] < 100 or size[1] < 100:   # cuma dipindah / ukuran aneh
+            return
+        state["size"] = size
+        if state["job"] is not None:
+            try:
+                dialog.after_cancel(state["job"])
+            except (ValueError, tk.TclError):
+                pass
+        state["job"] = dialog.after(500, persist)
+
+    def on_destroy(event):
+        if event.widget is dialog and state["job"] is not None:
+            persist()      # ditutup sebelum jeda 0,5 dtk habis -> tetap simpan ukuran terakhir
+
+    dialog.after(800, arm)
+    dialog.bind("<Configure>", on_configure, add="+")
+    dialog.bind("<Destroy>", on_destroy, add="+")
+    return w, h
 
 def find_proton_installations(base_dir):
     """Scan build Proton (GE atau CachyOS) yang sudah diekstrak didalam sebuah folder.
@@ -3385,7 +3495,8 @@ def open_prefix_manager_dialog():
     Proton GE/Proton-CachyOS yang sudah pernah dibuat (beserta nama game/aplikasi yang
     memakainya), lalu memungkinkan membuka winecfg, Wine Explorer, uninstaller Windows, atau
     Winetricks KHUSUS untuk prefix yang dipilih saja. Jendelanya bisa di-resize bebas, dan ada
-    scrollbar horizontal untuk kolom yang kepotong."""
+    scrollbar horizontal untuk kolom yang kepotong. Baris tombol di bawah selalu terlihat (yang
+    mengecil adalah daftarnya), dan ukuran jendela yang terakhir diatur diingat ke sesi berikutnya."""
     prefixes = list_all_known_prefixes()
 
     dialog = tk.Toplevel(root)
@@ -3393,7 +3504,6 @@ def open_prefix_manager_dialog():
     dialog.title("Prefix Configuration Manager")
     dialog.configure(bg=COLORS["primary"])
     dialog.resizable(True, True)
-    dialog.minsize(640, 360)
 
     frame = ttk.Frame(dialog, padding=15)
     frame.pack(fill=tk.BOTH, expand=True)
@@ -3401,14 +3511,25 @@ def open_prefix_manager_dialog():
     top_bar = ttk.Frame(frame)
     top_bar.pack(fill=tk.X, pady=(0, 8))
 
-    ttk.Label(top_bar, text="Select a prefix to configure (winecfg / explorer / uninstaller / winetricks):",
-              font=FONTS["normal"]).pack(side=tk.LEFT, anchor="w")
-
+    # Tombol dipasang DULU (side=RIGHT) lalu teks - kalau jendela sempit, teksnya yang terpotong/wrap,
+    # bukan tombol Refresh / Show Logs.
     refresh_btn = ttk.Button(top_bar, text="Refresh", style="Custom.TButton", width=12)
     refresh_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
     show_logs_btn = ttk.Button(top_bar, text="Show Logs", style="Custom.TButton", width=12)
     show_logs_btn.pack(side=tk.RIGHT, padx=(0, 6))
+
+    top_label = ttk.Label(top_bar, text="Select a prefix to configure (winecfg / explorer / uninstaller / winetricks):",
+                          font=FONTS["normal"], justify=tk.LEFT)
+    top_label.pack(side=tk.LEFT, anchor="w")
+    top_bar.bind("<Configure>",
+                 lambda e: top_label.config(wraplength=max(160, e.width - 260)), add="+")
+
+    # Baris tombol bawah dipasang SEBELUM daftar (side=BOTTOM). Packer memberi ruang sesuai urutan
+    # pemasangan, jadi widget yang dipasang belakangan yang terpotong bila ruang kurang: dengan urutan
+    # ini, daftar (yang expand) yang mengecil - tombol tidak pernah tertutup.
+    bottom = ttk.Frame(frame)
+    bottom.pack(side=tk.BOTTOM, fill=tk.X)
 
     list_frame = ttk.Frame(frame)
     list_frame.pack(fill=tk.BOTH, expand=True)
@@ -3426,7 +3547,7 @@ def open_prefix_manager_dialog():
                                 yscrollcommand=vscroll.set,
                                 xscrollcommand=hscroll.set,
                                 selectmode="browse",
-                                height=10)
+                                height=4)     # tinggi minimum; tingginya mengikuti ukuran jendela
     prefix_tree.grid(row=0, column=0, sticky="nsew")
     vscroll.config(command=prefix_tree.yview)
     hscroll.config(command=prefix_tree.xview)
@@ -3466,7 +3587,7 @@ def open_prefix_manager_dialog():
         if prefixes:
             empty_label.pack_forget()
         else:
-            empty_label.pack(anchor="w", pady=(8, 0))
+            empty_label.pack(anchor="w", pady=(0, 8), after=top_bar)
         if selected_iid is not None and prefix_tree.exists(selected_iid):
             prefix_tree.selection_set(selected_iid)
 
@@ -3484,7 +3605,7 @@ def open_prefix_manager_dialog():
                 return entry
         return None
 
-    btn_row = ttk.Frame(frame)
+    btn_row = ttk.Frame(bottom)
     btn_row.pack(pady=(10, 0))
 
     def do_winecfg():
@@ -3567,7 +3688,7 @@ def open_prefix_manager_dialog():
             prefixes[:] = [e for e in prefixes
                            if not (e["runner"] == entry["runner"] and e["prefix_code"] == entry["prefix_code"])]
 
-    btn_row2 = ttk.Frame(frame)
+    btn_row2 = ttk.Frame(bottom)
     btn_row2.pack(pady=(8, 0))
     ttk.Button(btn_row2, text="Backup Apps", style="Custom.TButton", width=12,
                command=do_backup).grid(row=0, column=0, padx=3)
@@ -3576,11 +3697,17 @@ def open_prefix_manager_dialog():
     ttk.Button(btn_row2, text="Remove Apps", style="Custom.TButton", width=12,
                command=do_remove_prefix).grid(row=0, column=2, padx=3)
 
-    init_width, init_height = 1000, 520
+    # Ukuran minimum = kebutuhan isi yang sebenarnya (bar atas + 2 baris tombol + 4 baris daftar),
+    # bukan angka tetap. Lebar minimum tidak memasukkan kolom daftar (itu tugas scrollbar horizontal).
     dialog.update_idletasks()
-    x = root.winfo_rootx() + (root.winfo_width() - init_width) // 2
-    y = root.winfo_rooty() + (root.winfo_height() - init_height) // 2
-    dialog.geometry(f"{init_width}x{init_height}+{max(x, 0)}+{max(y, 0)}")
+    min_w = max(640, btn_row.winfo_reqwidth() + 60)
+    min_h = dialog.winfo_reqheight()
+    try:
+        row_h = int(style.lookup("Treeview", "rowheight") or 32)
+    except (ValueError, tk.TclError):
+        row_h = 32
+    default_h = min_h + 6 * row_h        # kira-kira 10 baris daftar terlihat pada ukuran awal
+    remember_dialog_size(dialog, "prefix_manager", (1000, default_h), (min_w, min_h), parent=root)
     dialog.deiconify()
     dialog.transient(root)
     dialog.grab_set()

@@ -244,6 +244,44 @@ def _helper_python():
     return sys.executable
 
 
+_BUNDLE_ENV_VARS = (
+    "PYTHONHOME", "PYTHONPATH", "GI_TYPELIB_PATH", "GIO_EXTRA_MODULES", "GIO_MODULE_DIR",
+    "GDK_PIXBUF_MODULE_FILE", "GDK_PIXBUF_MODULEDIR", "GTK_PATH", "GTK_EXE_PREFIX",
+    "GTK_DATA_PREFIX", "GTK_IM_MODULE_FILE", "GSETTINGS_SCHEMA_DIR", "GST_PLUGIN_PATH",
+    "GST_PLUGIN_SYSTEM_PATH", "GST_PLUGIN_SCANNER", "LD_PRELOAD", "QT_PLUGIN_PATH",
+    "QML2_IMPORT_PATH", "WEBKIT_EXEC_PATH", "WEBKIT_INJECTED_BUNDLE_PATH", "_MEIPASS2")
+
+
+def _helper_env():
+    """Environment untuk browser login. Dari build AppImage/PyInstaller, variabel library/GTK milik
+    bundel (GI_TYPELIB_PATH, GTK_PATH, LD_LIBRARY_PATH, dll.) ikut diwariskan ke python3 sistem dan
+    membuat WebKit2GTK memuat komponen yang tidak cocok -> jendela login putih. Di sini variabel itu
+    dibuang / dikembalikan. Saat dijalankan dari source, environment dibiarkan apa adanya."""
+    env = dict(_host.clean_env())
+    if not (getattr(sys, "frozen", False) or "APPIMAGE" in env or env.get("APPDIR")):
+        return env
+    roots = [r.rstrip("/") for r in (env.get("APPDIR"), getattr(sys, "_MEIPASS", None)) if r]
+
+    def outside(path):
+        return not any(path == r or path.startswith(r + "/") for r in roots)
+
+    orig = env.pop("LD_LIBRARY_PATH_ORIG", None)      # diisi PyInstaller
+    if orig is not None:
+        env["LD_LIBRARY_PATH"] = orig
+    for key in _BUNDLE_ENV_VARS:
+        env.pop(key, None)
+    for key in [k for k in env if k.startswith("_PYI")]:
+        env.pop(key, None)
+    for key in ("LD_LIBRARY_PATH", "PATH", "XDG_DATA_DIRS", "XDG_CONFIG_DIRS"):
+        if key in env:
+            kept = [p for p in env[key].split(":") if p and outside(p)]
+            if kept:
+                env[key] = ":".join(kept)
+            else:
+                env.pop(key)
+    return env
+
+
 def login_via_browser(cfg):
     """Buka browser mini (gog_login_browser.py, proses terpisah), tunggu kode login, lalu tukar
     jadi token. BLOCKING - panggil dari background thread."""
@@ -252,7 +290,7 @@ def login_via_browser(cfg):
     cmd += [str(Path(__file__).with_name("gog_login_browser.py")), login_url(cfg),
             "--watch", urllib.parse.urlparse(cfg["redirect_uri"]).path.strip("/")]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=_host.clean_env(),
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=_helper_env(),
                               timeout=int(cfg.get("browser_timeout") or 600))
     except FileNotFoundError as e:
         raise GogError(f"Could not start the browser helper: {e}")
