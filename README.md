@@ -1,6 +1,6 @@
 ## WLM - Wine Launch Manager
 
-Wine Launch Manager (WLM) is a Python3-based application for managing Vanilla Wine, Proton GE, and Proton-CachyOS applications on Linux distributions.
+Wine Launch Manager (WLM) is a Python3-based application for managing Vanilla Wine, Proton GE, and Proton-CachyOS applications on Linux distributions. It also includes a GOG Store client, a Save Manager, and a cover-art game library.
 
 ![Screenshot WLM](WLM_SS/1.png)
 
@@ -10,8 +10,7 @@ Wine Launch Manager (WLM) is a Python3-based application for managing Vanilla Wi
 
 ### **Before Using for installed packet, Ensure:**
 
-1. You have installed Wine Vanilla correctly (Optional).
-2. You have installed the following Python packages:
+1. You have installed the following Python packages:
    - `python3-tkinter`
    - `python3-pillow`
    - `python3-pillow-imagetk`
@@ -19,6 +18,8 @@ Wine Launch Manager (WLM) is a Python3-based application for managing Vanilla Wi
    - `xdg-utils`
 
    *(Use the commands below or adjust according to your distribution.)*
+
+2. *(Optional)* Wine Vanilla is only needed if you use the **Wine (Vanilla)** runner. Proton GE and Proton-CachyOS use the Wine bundled inside their own folders, so a system-wide Wine is not required for them.
 
 ### Note: Alternatively, you can use the **AppImage** version for a portable app.
 
@@ -42,24 +43,54 @@ sudo dnf install python3-tkinter python3-pillow python3-pyyaml xdg-utils
 
 ---
 
+## Optional Extras
+
+None of these are required to start WLM. Install only what you need:
+
+| Package | Needed for |
+|---|---|
+| `winetricks` | Winetricks features inside a prefix |
+| `mangohud` | The **Mangohud** / **MangoHud-GL** launch modes (GalliumHUD and VulkanHUD need no extra package) |
+| `pywebview` + GTK/WebKit2GTK | The built-in GOG login browser (without it, use the manual login: open the GOG page in your normal browser and paste the redirect URL) |
+
+### **Debian / Ubuntu / Linux Mint**
+```bash
+sudo apt install winetricks mangohud python3-webview python3-gi
+```
+
+### **Arch Linux / Manjaro**
+```bash
+sudo pacman -S winetricks mangohud python-pywebview python-gobject
+```
+
+### **Fedora**
+```bash
+sudo dnf install winetricks mangohud python3-gobject
+```
+> Fedora has no pywebview package in its repositories (as far as we could find), so the built-in GOG login browser is not available there out of the box. Use the manual GOG login instead (open the GOG page in your normal browser and paste the redirect URL).
+
+> If the GOG login window does not open or stays blank, also install the WebKit2GTK package for your distribution.
+
+---
+
 ## Install using *.deb or *.rpm:
 ![Screenshot WLM](WLM_SS/7.png)
 
 ### **Debian/Ubuntu/Mint Linux**
 ```bash
 sudo apt update
-sudo apt install ./winelaunchmanager_x.x.x_amd64.deb
+sudo apt install ./winelaunchmanager_*_amd64.deb
 ```
 > Using `apt install ./file.deb` (instead of `dpkg -i`) lets apt automatically resolve and download all required dependencies (`python3-tk`, `python3-pil`, etc.) from your distro's repositories.
 >
-> If you install with `dpkg -i winelaunchmanager_x.x.x_amd64.deb` instead and it complains about missing dependencies, just run:
+> If you install with `dpkg -i winelaunchmanager_*_amd64.deb` instead and it complains about missing dependencies, just run:
 > ```bash
 > sudo apt --fix-broken install
 > ```
 
 ### **Fedora Linux**
 ```bash
-sudo dnf install ./winelaunchmanager-x.x.x*.rpm
+sudo dnf install ./winelaunchmanager_*_x86_64.rpm
 ```
 
 ---
@@ -86,10 +117,25 @@ sudo dnf install ./winelaunchmanager-x.x.x*.rpm
 - Backup and restore a prefix as a `.tar.gz` archive, with live progress and the ability to cancel mid-way.
 - Uninstall applications installed within Wine.
 - Create and manage a shortcut list in the Launcher, with per-game icons.
+- Cover-art grid view for your game library (covers are looked up by title, loaded lazily and cached), with a plain list view as an alternative.
+- **GOG Store**: log in through the official GOG page, browse your library, and download games either as offline installers (**Download Setup**) or straight from the GOG Galaxy content system (**Direct Download**: resumable, no installer needed).
+- **Save Manager** (**SAVES** button): local save backup/restore, plus GOG cloud save check and download (a backup is made automatically before anything is overwritten).
+- Shortcuts are created automatically after installing a game (via **INSTALL APPS** or the GOG Store).
 - Live log window for running games/apps and Winetricks output.
   
 ![Screenshot WLM](WLM_SS/3.png)
 - Display FPS using GalliumHUD, VulkanHUD, & MangoHud (External Configuration), with configurable metrics and scale.
+
+---
+
+## GOG Store & Saves
+
+- **Login**: done on the official GOG page. Your password never passes through WLM; only an OAuth token is stored in `~/wlm/gog_auth.json` (permission 600). You can log in with the built-in mini browser (needs `pywebview` + GTK/WebKit2GTK) or manually by pasting the redirect URL.
+- **Settings**: endpoints, download folder, and OS/language filters are read from `~/wlm/gog_config.json`, created automatically on first use.
+- **Download Setup**: downloads the offline installer (`setup_*.exe` + `.bin`) and can run it through your chosen runner.
+- **Direct Download**: downloads the game files directly into `~/wlm/gog_games/<game>/` (or your configured `game_dir`). Re-running it on the same folder only downloads missing or changed files. Redistributables (VC++/DirectX) are **not** installed automatically.
+- **Cloud saves**: **Check Cloud** compares cloud and local files without changing anything; **Download & Overwrite** replaces local files with the same name after a warning and an automatic backup. Uploading to the cloud is intentionally not available.
+- **Local backups** are stored in `~/wlm/save_backups/<game>/*.tar.gz`.
 
 ---
 
@@ -121,7 +167,7 @@ Check which version of WLM you have installed without opening the GUI:
 
 ```bash
 $ winelaunchmanager --version
-WLM Version: 0.x.x-x
+WLM Version: 0.4.7-Beta
 Developer: Opensource OS Gathering Republic (OOGR)
 Maintener: Didi Sloth Stanca
 ```
@@ -153,7 +199,7 @@ Simply delete the `wlm` directory using your file manager:
 ```bash
 rm -rf ~/wlm
 ```
-> ⚠️ This removes every Wine/Proton prefix WLM created (all your installed Windows apps and games inside them), along with themes, window position, and the prefix registry. Back up anything you want to keep first.
+> ⚠️ This removes every Wine/Proton prefix WLM created (all your installed Windows apps and games inside them), along with themes, window position, the prefix registry, your GOG login token, covers, save backups, and any games downloaded by Direct Download into `~/wlm/gog_games`. Back up anything you want to keep first.
 
 ---
 
