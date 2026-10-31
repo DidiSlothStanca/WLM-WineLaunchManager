@@ -32,7 +32,7 @@ except ImportError:
     yaml = None
     _YAML_AVAILABLE = False
 
-WLM_VERSION = "0.4.7-Beta"
+WLM_VERSION = "0.4.8-Beta"
 WLM_DEVELOPER = "Opensource OS Gathering Republic (OOGR)"
 WLM_MAINTAINER = "Didi Sloth Stanca"
 
