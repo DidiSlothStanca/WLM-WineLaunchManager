@@ -1652,6 +1652,19 @@ def relink_scripts_after_prefix_move(runner_key, prefix_code, old_prefix_path, n
         save_runner_config(runner_cfg)
     return updated_scripts
 
+def _ps():
+    """Muat prefix_share.py (satu folder dengan launcher). None kalau tidak ada - fitur prefix
+    bersama & sinkronisasi save saja yang mati, launcher tetap jalan."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import prefix_share
+        return prefix_share
+    except ImportError:
+        print("[WLM] prefix_share.py not found next to the launcher - shared prefix & save sync disabled.")
+        return None
+
 def find_owning_prefix(exe_path):
     """Cek apakah exe_path berada didalam salah satu folder prefix (Wine/Proton GE/
     Proton-CachyOS) yang sudah pernah dibuat. Dipakai saat menambahkan game baru (+ ADD):
@@ -1711,6 +1724,31 @@ def find_owning_prefix(exe_path):
                 "proton_name": reg_entry.get("proton_name"),
                 "proton_path": reg_entry.get("proton_path"),
             }
+
+    # Fallback: exe berada didalam drive_c sebuah prefix di LOKASI MANA PUN (disk lain, ~/.wine,
+    # prefix buatan Lutris/Bottles/dll yang belum pernah tercatat di launcher ini).
+    ps = _ps()
+    info = ps.find_prefix_for_exe(exe_resolved) if ps else None
+    if info:
+        key = ps.physical_key(info)
+        reg_entry = {}
+        for entry in registry.values():
+            other = ps.inspect_prefix(entry.get("prefix_path") or "")
+            if other and ps.physical_key(other) == key:
+                reg_entry = entry
+                if entry.get("proton_path"):
+                    break
+        if info["kind"] == "wine":
+            runner = "wine"
+        else:      # prefix Proton: GE atau CachyOS belum tentu diketahui
+            runner = reg_entry.get("runner") if reg_entry.get("runner") in ("protonge", "protoncachyos") else None
+        return {
+            "runner": runner,
+            "prefix_code": ps.code_for_prefix(info, registry),
+            "prefix_path": str(info["root"]),
+            "proton_name": reg_entry.get("proton_name"),
+            "proton_path": reg_entry.get("proton_path"),
+        }
     return None
 
 def list_all_known_prefixes():
@@ -3688,6 +3726,27 @@ def open_prefix_manager_dialog():
             prefixes[:] = [e for e in prefixes
                            if not (e["runner"] == entry["runner"] and e["prefix_code"] == entry["prefix_code"])]
 
+    def do_move_prefix():
+        entry = get_selected_entry()
+        if not entry:
+            return
+        key = f"{entry['runner']}:{entry['prefix_code']}"
+        if any(g in running_games and running_games[g].get("proc") is not None
+               and running_games[g]["proc"].poll() is None for g in (entry.get("games") or [])):
+            messagebox.showerror("Game Running", "Close the game(s) using this prefix before moving it.",
+                                 parent=dialog)
+            return
+
+        def on_moved(new_path):
+            updated = relink_scripts_after_prefix_move(entry["runner"], entry["prefix_code"],
+                                                       Path(entry["prefix_path"]), new_path)
+            update_registry_prefix_path(entry["runner"], entry["prefix_code"], new_path)
+            refresh_prefix_list()
+            if updated:
+                safe_status_config(text=f"Prefix moved - relinked {len(updated)} game(s): {', '.join(updated)}",
+                                   fg=COLORS["success"])
+        move_prefix_folder_dialog(Path(entry["prefix_path"]), entry["prefix_code"], entry["runner"], on_moved)
+
     btn_row2 = ttk.Frame(bottom)
     btn_row2.pack(pady=(8, 0))
     ttk.Button(btn_row2, text="Backup Apps", style="Custom.TButton", width=12,
@@ -3696,6 +3755,8 @@ def open_prefix_manager_dialog():
                command=do_restore).grid(row=0, column=1, padx=3)
     ttk.Button(btn_row2, text="Remove Apps", style="Custom.TButton", width=12,
                command=do_remove_prefix).grid(row=0, column=2, padx=3)
+    ttk.Button(btn_row2, text="Move Prefix...", style="Custom.TButton", width=12,
+               command=do_move_prefix).grid(row=0, column=3, padx=3)
 
     # Ukuran minimum = kebutuhan isi yang sebenarnya (bar atas + 2 baris tombol + 4 baris daftar),
     # bukan angka tetap. Lebar minimum tidak memasukkan kolom daftar (itu tugas scrollbar horizontal).
@@ -3745,19 +3806,97 @@ def browse_folder_with_create_option(title, initialdir):
         messagebox.showerror("Error", f"Failed to create folder:\n{str(e)}")
         return chosen_path
 
+def repoint_shared_prefix_users(old_info, old_path, new_path, own_runner, own_code):
+    """Setelah sebuah prefix dipindah, perbaiki juga runner LAIN yang memakai prefix fisik yang
+    sama (lihat adopt_existing_prefix): folder link Proton (link_*/pfx -> prefix Wine) diarahkan
+    ke lokasi baru, dan entri runner lain yang menunjuk langsung ke prefix lama diperbarui
+    (registry + script game-nya). Return daftar nama yang diperbarui."""
+    ps = _ps()
+    if ps is None or not old_info:
+        return []
+    new_info = ps.inspect_prefix(new_path)
+    if not new_info:
+        return []
+    old_wd, new_wd = Path(old_info["wine_dir"]), Path(new_info["wine_dir"])
+    touched = []
+
+    for root_dir in DEFAULT_PREFIX_ROOTS.values():
+        if not root_dir.is_dir():
+            continue
+        for wrapper in root_dir.glob("link_*"):
+            link = wrapper / "pfx"
+            if not link.is_symlink():
+                continue
+            try:
+                target = Path(os.readlink(link))
+            except OSError:
+                continue
+            if target == old_wd:
+                link.unlink()
+                link.symlink_to(new_wd, target_is_directory=True)
+                touched.append(wrapper.name)
+
+    registry = load_prefix_registry()
+    for key, entry in list(registry.items()):
+        if key == f"{own_runner}:{own_code}":
+            continue
+        entry_path = entry.get("prefix_path")
+        if entry_path == str(old_path):
+            target = Path(new_path)
+        elif entry_path == str(old_wd):
+            target = new_wd
+        else:
+            continue
+        runner, code = entry.get("runner"), entry.get("prefix_code")
+        if not runner or not code:
+            continue
+        update_registry_prefix_path(runner, code, target)
+        relink_scripts_after_prefix_move(runner, code, Path(entry_path), target)
+        touched.append(f"{runner}:{code}")
+    return touched
+
 def move_prefix_folder_dialog(old_path, prefix_code, runner_key, on_done):
     """Minta pengguna memilih folder/disk tujuan, lalu pindahkan folder prefix (old_path)
     kesana di background thread (supaya UI tidak freeze untuk prefix berukuran besar).
     Memanggil on_done(new_path) di main thread jika berhasil."""
+    ps = _ps()
+    old_path = Path(old_path)
+    if (old_path / "pfx").is_symlink():
+        messagebox.showerror(
+            "Linked Prefix",
+            f"'{prefix_code}' is only a link to a prefix that lives elsewhere "
+            f"(shared with another runner):\n{(old_path / 'pfx').resolve()}\n\n"
+            "Move the original prefix instead - this link is updated automatically.")
+        return
+    old_info = ps.inspect_prefix(old_path) if ps else None
+
     initial_dir = str(old_path.parent) if old_path.parent.is_dir() else str(Path.home())
-    new_base_path = browse_folder_with_create_option(
-        title=f"Choose New Location for Prefix {prefix_code}",
-        initialdir=initial_dir
-    )
-    if new_base_path is None:
+    while True:
+        chosen = filedialog.askdirectory(
+            title=f"Choose New Location for Prefix {prefix_code}", initialdir=initial_dir, mustexist=True)
+        if not chosen:
+            return
+        chosen = Path(chosen)
+        found = ps.prefix_containing(chosen) if ps else None
+        if found is None:
+            break
+        messagebox.showerror(
+            "Destination Is a Prefix",
+            f"A prefix already exists here:\n{found['root']}\n\n"
+            "A prefix can't be moved into or over another prefix (it would nest or overwrite it).\n"
+            "Pick a different folder/disk. To share that prefix instead of moving this one, use "
+            "'Browse Other Folder/Disk...' on the runner and choose 'Use'.")
+        initial_dir = str(Path(found["root"]).parent)
+
+    folder_name = simpledialog.askstring(
+        "Prefix Folder Name", f"Folder name for the moved prefix inside\n{chosen}:",
+        initialvalue=prefix_code, parent=root)
+    folder_name = "".join(c for c in (folder_name or "") if c.isalnum() or c in "_-. ").strip().strip(".")
+    if not folder_name:
         return
 
-    new_path = new_base_path / prefix_code
+    new_base_path = chosen
+    new_path = new_base_path / folder_name
 
     try:
         same_location = new_path.resolve() == old_path.resolve()
@@ -3828,7 +3967,15 @@ def move_prefix_folder_dialog(old_path, prefix_code, runner_key, on_done):
 
         if move_result["error"] is None:
             safe_status_config(text=f"Prefix '{prefix_code}' moved to {new_path}", fg=COLORS["success"])
+            try:
+                shared = repoint_shared_prefix_users(old_info, old_path, new_path, runner_key, prefix_code)
+            except Exception as e:
+                shared = []
+                print(f"[WLM] shared prefix relink error: {e}")
             on_done(new_path)
+            if shared:
+                safe_status_config(text=f"Prefix moved - also updated shared users: {', '.join(shared)}",
+                                   fg=COLORS["success"])
         else:
             e = move_result["error"]
             safe_status_config(text=f"Error moving prefix: {str(e)}", fg=COLORS["danger"])
@@ -3961,6 +4108,126 @@ def build_script_content(folder_path, exe_path, choice):
         lines.append(f'wine "{exe_path}"{extra_args_str}')
     return "\n".join(lines) + "\n"
 
+def adopt_existing_prefix(runner_key, folder, parent=None):
+    """Pakai prefix yang SUDAH ADA (folder) untuk runner_key, tanpa menyalin/menumpuknya.
+    Wine <-> Proton bisa berbagi satu prefix fisik: Proton memakai folder 'wrapper' berisi
+    symlink pfx -> prefix Wine, Wine memakai <compat>/pfx. Data game, save, dan registry
+    tetap SATU tempat. Return {'code', 'path'} atau None (dibatalkan/gagal)."""
+    ps = _ps()
+    if ps is None:
+        messagebox.showerror("Prefix", "prefix_share.py was not found next to the launcher.", parent=parent)
+        return None
+    info = ps.inspect_prefix(folder)
+    if info is None:
+        messagebox.showerror("Not a Prefix", f"This folder is not a Wine/Proton prefix:\n{folder}", parent=parent)
+        return None
+    code = ps.code_for_prefix(info, load_prefix_registry())
+    is_proton_runner = runner_key in ("protonge", "protoncachyos")
+    if is_proton_runner and info["kind"] == "wine":
+        if not messagebox.askokcancel(
+                "Use Wine Prefix with Proton",
+                f"'{code}' is a vanilla Wine prefix.\n\n"
+                "It will be SHARED with Proton (a small link folder is created, nothing is copied), "
+                "so installed games, saves and settings stay in one place.\n\n"
+                "Note: Proton may update some Wine components inside it the first time. "
+                "Making a backup first (Prefix Manager > Backup) is recommended.\n\nContinue?",
+                parent=parent):
+            return None
+        try:
+            path = ps.make_proton_wrapper(info["wine_dir"], DEFAULT_PREFIX_ROOTS[runner_key] / f"link_{code}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not link the prefix:\n{e}", parent=parent)
+            return None
+    elif is_proton_runner:
+        path = info["root"]
+    else:
+        path = info["wine_dir"]
+        if info["kind"] == "proton" and not messagebox.askokcancel(
+                "Use Proton Prefix with Wine",
+                f"'{code}' is a Proton prefix. Wine will use it directly "
+                "(saves and installed games are kept, nothing is copied).\n\nContinue?",
+                parent=parent):
+            return None
+    return {"code": code, "path": Path(path)}
+
+def pick_prefix_location(runner_key, runner_label, initialdir, parent=None):
+    """Dialog 'Browse Other Folder/Disk': pilih folder, lalu launcher tanya mau MEMAKAI prefix
+    yang sudah ada di sana atau MEMBUAT yang baru. Prefix baru TIDAK PERNAH dibuat didalam
+    prefix lain. Return salah satu:
+      {'mode': 'existing', 'code', 'path'}  - pakai prefix yang sudah ada (dipakai bersama)
+      {'mode': 'new', 'code', 'path'}       - buat prefix baru di path itu
+      {'mode': 'base', 'path'}              - folder ini jadi lokasi dasar prefix-prefix baru
+      None                                  - dibatalkan"""
+    ps = _ps()
+    chosen = filedialog.askdirectory(
+        title=f"Choose a {runner_label} Prefix, or a Folder for a New One",
+        initialdir=initialdir, mustexist=True, parent=parent)
+    if not chosen:
+        return None
+    chosen = Path(chosen)
+
+    found = ps.prefix_containing(chosen) if ps else None
+    if found:
+        kind = "Proton" if found["kind"] == "proton" else "Wine"
+        answer = messagebox.askyesnocancel(
+            "Existing Prefix Found",
+            f"A {kind} prefix already exists here:\n{found['root']}\n\n"
+            "Yes = USE this prefix (installed apps, saves and settings are kept; "
+            "you can add more apps to it)\n"
+            "No = create a NEW prefix instead (you will pick another folder - new prefixes "
+            "are never created inside an existing one)\n"
+            "Cancel = go back", parent=parent)
+        if answer is None:
+            return None
+        if answer:
+            got = adopt_existing_prefix(runner_key, found["root"], parent)
+            return {"mode": "existing", **got} if got else None
+        return pick_prefix_location(runner_key, runner_label, str(Path(found["root"]).parent), parent)
+
+    answer = messagebox.askyesnocancel(
+        "New Prefix",
+        f"No prefix was found in:\n{chosen}\n\n"
+        "Yes = create a NEW prefix inside this folder\n"
+        "No = only use this folder as the base location for future new prefixes\n"
+        "Cancel = go back", parent=parent)
+    if answer is None:
+        return None
+    if not answer:
+        return {"mode": "base", "path": chosen}
+
+    registry = load_prefix_registry()
+    default_name = generate_next_prefix_code(runner_key)
+    name = simpledialog.askstring("New Prefix", "Folder name for the new prefix:",
+                                  initialvalue=default_name, parent=parent)
+    name = "".join(c for c in (name or "") if c.isalnum() or c in "_-. ").strip().strip(".")
+    if not name:
+        return None
+    path = chosen / name
+    if path.exists() and (ps.inspect_prefix(path) or any(path.iterdir())):
+        messagebox.showerror("Folder Not Empty",
+                             f"'{path}' already exists and is not an empty folder.\n"
+                             "Pick another name, or choose it again to USE it as an existing prefix.",
+                             parent=parent)
+        return None
+    code, n = name, 2
+    while f"{runner_key}:{code}" in registry and registry[f"{runner_key}:{code}"].get("prefix_path") != str(path):
+        code = f"{name}-{n}"
+        n += 1
+    return {"mode": "new", "code": code, "path": path}
+
+def resolve_prefix_state(runner_key, st):
+    """(prefix_code, prefix_path) final dari state panel prefix di ask_runner_choice.
+    Urutan: prefix yang dipilih manual > prefix baru di lokasi pilihan > prefix game ini
+    sebelumnya > prefix baru otomatis di lokasi dasar."""
+    if st.get("picked"):
+        return st["picked"]["code"], Path(st["picked"]["path"])
+    if st.get("new_explicit"):
+        return st["new_explicit"]["code"], Path(st["new_explicit"]["path"])
+    if st["existing_path"] is not None:
+        return st["existing_code"], st["existing_path"]
+    code = generate_next_prefix_code(runner_key)
+    return code, st["new_base_dir"] / code
+
 def ask_runner_choice(parent_script_name=None, purpose="play", parent=None, game_title=None):
     """
     Tampilkan dialog pilihan runner: Wine (Vanilla) atau Proton GE.
@@ -4018,19 +4285,24 @@ def ask_runner_choice(parent_script_name=None, purpose="play", parent=None, game
     runner_dynamic_frame.pack(anchor="w", fill=tk.X, pady=(0, 0))
 
     def build_prefix_panel(parent_frame, runner_key, runner_label_text):
-        """Membuat panel kontrol lokasi prefix untuk satu runner (wine/protonge/protoncachyos)
-        didalam dialog ini. Dua kondisi:
-          - Prefix untuk game ini SUDAH ADA (dipakai ulang) -> tampilkan lokasinya sekarang
-            + tombol "Move Prefix..." untuk memindahkannya ke folder/disk lain kapan saja.
-          - Prefix untuk game ini BELUM ADA (akan dibuat baru saat OK ditekan) -> tampilkan
-            lokasi tujuan (default folder WLM, atau lokasi kustom tersimpan) + tombol untuk
-            memilih folder/disk lain atau mengembalikannya ke lokasi default.
-        Mengembalikan (panel_frame, state_dict). state_dict dibaca saat OK ditekan untuk
-        menentukan prefix_path final yang dipakai."""
-        state = {"existing_path": None, "existing_code": None, "new_base_dir": get_prefix_base_dir(runner_key)}
+        """Panel lokasi prefix untuk satu runner. Tiga kondisi:
+          - prefix game ini sudah ada -> lokasinya + Move Prefix / Saves / Use Other Prefix.
+          - memilih prefix lain -> 'Browse Other Folder/Disk': PAKAI prefix yang sudah ada
+            (dipakai bersama aplikasi lain) atau BUAT yang baru di lokasi pilihan.
+          - belum ada -> prefix baru otomatis di lokasi dasar (default WLM / lokasi pilihan).
+        Jika runner game ini sebelumnya memakai prefix dari runner lain, ada tombol untuk
+        memakai prefix yang SAMA (ganti runner saja, data game & save tetap)."""
+        state = {"existing_path": None, "existing_code": None, "picked": None, "new_explicit": None,
+                 "new_base_dir": get_prefix_base_dir(runner_key)}
         if existing_cfg and existing_cfg.get("runner") == runner_key and existing_cfg.get("prefix_code") and existing_cfg.get("prefix_path"):
             state["existing_path"] = Path(existing_cfg["prefix_path"])
             state["existing_code"] = existing_cfg["prefix_code"]
+
+        other_prefix = None      # prefix game ini di runner LAIN (bisa dipakai bersama)
+        _ps_mod = _ps()
+        if (existing_cfg and existing_cfg.get("runner") != runner_key and existing_cfg.get("prefix_path")
+                and _ps_mod and _ps_mod.inspect_prefix(existing_cfg["prefix_path"])):
+            other_prefix = existing_cfg["prefix_path"]
 
         panel = ttk.Frame(parent_frame)
         info_var = tk.StringVar()
@@ -4041,26 +4313,50 @@ def ask_runner_choice(parent_script_name=None, purpose="play", parent=None, game
 
         move_btn = ttk.Button(btn_row, text="Move Prefix...", style="Custom.TButton")
         saves_btn_inline = ttk.Button(btn_row, text="Saves...", style="Custom.TButton")
+        change_btn = ttk.Button(btn_row, text="Use Other Prefix...", style="Custom.TButton")
         browse_btn = ttk.Button(btn_row, text="Browse Other Folder/Disk...", style="Custom.TButton")
         default_btn = ttk.Button(btn_row, text="Use Default (WLM Folder)", style="Custom.TButton")
+        same_btn = ttk.Button(btn_row, text="Same Prefix as Current", style="Custom.TButton")
 
         # Saves hanya masuk akal kalau game-nya sudah pernah di-launch (prefix sudah ada) dan
         # kita tahu game mana yang dimaksud (purpose == "play", bukan dialog Setup/Install).
         show_saves_btn = purpose == "play" and bool(parent_script_name)
 
+        def shared_with(code, path):
+            names = [n for n, c in load_runner_config().items()
+                     if n != parent_script_name and c.get("prefix_code") == code]
+            return f"\nAlso used by: {', '.join(names)}" if names else ""
+
         def refresh():
-            for w in (move_btn, saves_btn_inline, browse_btn, default_btn):
+            for w in (move_btn, saves_btn_inline, change_btn, browse_btn, default_btn, same_btn):
                 w.pack_forget()
-            if state["existing_path"] is not None:
+            if state["picked"] is not None:
+                pk = state["picked"]
+                info_var.set(f"Using existing prefix: {pk['code']} (shared - saves & settings kept)\n"
+                             f"Location: {pk['path']}{shared_with(pk['code'], pk['path'])}")
+            elif state["new_explicit"] is not None:
+                ne = state["new_explicit"]
+                info_var.set(f"A new prefix '{ne['code']}' will be created at:\n{ne['path']}")
+            elif state["existing_path"] is not None:
                 info_var.set(f"Prefix: {state['existing_code']} (used previously, kept consistent)\n"
                               f"Location: {state['existing_path']}")
                 move_btn.pack(side=tk.LEFT)
                 if show_saves_btn:
                     saves_btn_inline.pack(side=tk.LEFT, padx=(5, 0))
+                change_btn.pack(side=tk.LEFT, padx=(5, 0))
+                return
             else:
                 info_var.set(f"A new prefix will be created automatically at:\n{state['new_base_dir']} (e.g. GAMEXXX)")
-                browse_btn.pack(side=tk.LEFT, padx=(0, 5))
-                default_btn.pack(side=tk.LEFT)
+            browse_btn.pack(side=tk.LEFT, padx=(0, 5))
+            has_own = state["existing_path"] is not None
+            default_btn.config(text="Back to Current Prefix" if has_own else "Use Default (WLM Folder)")
+            default_btn.pack(side=tk.LEFT)
+            if other_prefix and not has_own:
+                same_btn.pack(side=tk.LEFT, padx=(5, 0))
+
+        def after_change():
+            refresh()
+            refit_dialog()
 
         def do_move():
             def on_moved(new_path):
@@ -4076,28 +4372,47 @@ def ask_runner_choice(parent_script_name=None, purpose="play", parent=None, game
             move_prefix_folder_dialog(state["existing_path"], state["existing_code"], runner_key, on_moved)
 
         def do_browse():
-            initial = str(state["new_base_dir"]) if state["new_base_dir"].is_dir() else str(Path.home())
-            chosen_dir = browse_folder_with_create_option(
-                title=f"Choose Default Location for New {runner_label_text} Prefixes",
-                initialdir=initial
-            )
-            if chosen_dir:
-                state["new_base_dir"] = chosen_dir
-                set_prefix_base_dir(runner_key, state["new_base_dir"])
-                refresh()
+            if state["new_explicit"] is not None:
+                initial = str(Path(state["new_explicit"]["path"]).parent)
+            elif state["new_base_dir"].is_dir():
+                initial = str(state["new_base_dir"])
+            else:
+                initial = str(Path.home())
+            picked = pick_prefix_location(runner_key, runner_label_text, initial, dialog)
+            if not picked:
+                return
+            state["picked"] = state["new_explicit"] = None
+            if picked["mode"] == "existing":
+                state["picked"] = {"code": picked["code"], "path": picked["path"]}
+            elif picked["mode"] == "new":
+                state["new_explicit"] = {"code": picked["code"], "path": picked["path"]}
+            else:
+                state["new_base_dir"] = picked["path"]
+                set_prefix_base_dir(runner_key, picked["path"])
+            after_change()
 
         def do_default():
-            state["new_base_dir"] = DEFAULT_PREFIX_ROOTS[runner_key]
-            reset_prefix_base_dir(runner_key)
-            refresh()
+            state["picked"] = state["new_explicit"] = None
+            if state["existing_path"] is None:
+                state["new_base_dir"] = DEFAULT_PREFIX_ROOTS[runner_key]
+                reset_prefix_base_dir(runner_key)
+            after_change()
+
+        def do_same():
+            got = adopt_existing_prefix(runner_key, Path(other_prefix), dialog)
+            if got:
+                state["picked"] = got
+                after_change()
 
         def do_saves():
             open_save_manager(script_name=parent_script_name, parent_win=dialog)
 
         move_btn.config(command=do_move)
         saves_btn_inline.config(command=do_saves)
+        change_btn.config(command=do_browse)
         browse_btn.config(command=do_browse)
         default_btn.config(command=do_default)
+        same_btn.config(command=do_same)
 
         refresh()
         return panel, state
@@ -4222,12 +4537,7 @@ def ask_runner_choice(parent_script_name=None, purpose="play", parent=None, game
                 "comment": comment_value
             }
             if wine_use_prefix_var.get():
-                if wine_prefix_state["existing_path"] is not None:
-                    prefix_code = wine_prefix_state["existing_code"]
-                    prefix_path = wine_prefix_state["existing_path"]
-                else:
-                    prefix_code = generate_next_prefix_code("wine")
-                    prefix_path = wine_prefix_state["new_base_dir"] / prefix_code
+                prefix_code, prefix_path = resolve_prefix_state("wine", wine_prefix_state)
                 prefix_path.mkdir(parents=True, exist_ok=True)
                 record_prefix_usage("wine", prefix_code, prefix_path)
                 result_value["prefix_code"] = prefix_code
@@ -4256,13 +4566,7 @@ def ask_runner_choice(parent_script_name=None, purpose="play", parent=None, game
         idx = version_combo.current()
         proton_name, proton_path = build_list[idx]
 
-        if prefix_state["existing_path"] is not None:
-            prefix_code = prefix_state["existing_code"]
-            prefix_path = prefix_state["existing_path"]
-        else:
-            prefix_code = generate_next_prefix_code(runner_key)
-            prefix_path = prefix_state["new_base_dir"] / prefix_code
-
+        prefix_code, prefix_path = resolve_prefix_state(runner_key, prefix_state)
         prefix_path.mkdir(parents=True, exist_ok=True)
         record_prefix_usage(runner_key, prefix_code, prefix_path, proton_name, str(proton_path))
 
@@ -5031,6 +5335,51 @@ def run_script():
         safe_status_config(text="Launch cancelled.", fg=COLORS["text_secondary"])
         return
 
+    # Runner/prefix berganti -> tawarkan menyinkronkan save & konfigurasi game (dua arah, yang
+    # terbaru menang, yang kalah dicadangkan dulu - jadi tidak ada progress yang tertimpa).
+    prev_cfg = dict(load_runner_config().get(script_name_only) or {})
+    ps = _ps()
+    plan = None
+    if ps is not None and prev_cfg:
+        try:
+            plan = ps.plan_sync(prev_cfg, choice)
+        except Exception as e:
+            print(f"[WLM] sync plan error: {e}")
+    if plan:
+        answer = messagebox.askyesnocancel(
+            "Sync Saves & Settings",
+            f"You changed the runner/prefix for '{script_name_only}'.\n\n"
+            "Sync saves and game settings between the old and the new setup before launching?\n"
+            "- Both sides are merged; the NEWEST file wins\n"
+            "- The replaced (older) copy is backed up first, so nothing is lost\n"
+            "- Files only on one side are copied to the other\n\n"
+            "Yes = sync, then launch\nNo = launch without syncing\nCancel = don't launch")
+        if answer is None:
+            safe_status_config(text="Launch cancelled.", fg=COLORS["text_secondary"])
+            return
+        if answer:
+            backup_root = directory / "sync_backups" / script_name_only
+
+            def sync_work():
+                return ps.sync_user_homes(plan["a"], plan["b"], backup_root)
+
+            def sync_done(stats, error):
+                if error is not None:
+                    safe_status_config(text=f"Save sync failed: {error}", fg=COLORS["danger"])
+                else:
+                    safe_status_config(
+                        text=(f"Saves synced: {stats['a_to_b']} to new, {stats['b_to_a']} to old, "
+                              f"{stats['backed_up']} older copies backed up"
+                              + (f", {stats['conflicts']} conflicts left alone" if stats["conflicts"] else "")),
+                        fg=COLORS["success"])
+                _launch_with_choice(script_name_only, script_name, script_path, launch_mode, choice)
+
+            run_with_loading_overlay(root, "Syncing Saves", "Syncing saves and settings...", sync_work, sync_done)
+            return
+    _launch_with_choice(script_name_only, script_name, script_path, launch_mode, choice)
+
+def _launch_with_choice(script_name_only, script_name, script_path, launch_mode, choice):
+    """Bagian kedua run_script: tulis ulang script sesuai runner/prefix pilihan, simpan, dan jalankan."""
     exe_path = extract_exe_path_from_script(script_path)
     folder_path = extract_folder_path_from_script(script_path)
     if exe_path and folder_path:
@@ -5197,6 +5546,40 @@ def add_game_shortcut(name, exe_path, choice, icon_image=None, work_dir=None, so
             break
     return safe_name
 
+def owning_prefix_to_choice(owning):
+    """Ubah hasil find_owning_prefix jadi dict pilihan runner. Prefix Proton yang belum diketahui
+    build-nya (GE/CachyOS) ditanyakan. Return None kalau dibatalkan/tidak bisa."""
+    runner = owning.get("runner")
+    entry = {"runner": runner, "prefix_code": owning["prefix_code"],
+             "prefix_path": owning["prefix_path"], "launch_options": "", "comment": ""}
+    if runner == "wine":
+        return entry
+    if runner in ("protonge", "protoncachyos") and owning.get("proton_path"):
+        entry["proton_name"] = owning.get("proton_name") or ""
+        entry["proton_path"] = owning["proton_path"]
+        return entry
+    if runner not in ("protonge", "protoncachyos"):
+        has_ge, has_cachy = bool(find_protonge_installations()), bool(find_protoncachyos_installations())
+        if has_ge and has_cachy:
+            ans = messagebox.askyesnocancel(
+                "Proton Prefix",
+                "This game is inside a Proton prefix. Which Proton should run it?\n\n"
+                "Yes = Proton GE\nNo = Proton-CachyOS\nCancel = don't add this game")
+            if ans is None:
+                return None
+            runner = "protonge" if ans else "protoncachyos"
+        elif has_ge or has_cachy:
+            runner = "protonge" if has_ge else "protoncachyos"
+        else:
+            messagebox.showerror("Error", "This game is inside a Proton prefix, but no Proton build is "
+                                          "installed.\nExtract one first via the Settings menu.")
+            return None
+    picked = pick_proton_build_dialog(runner)
+    if picked is None:
+        return None
+    entry.update({"runner": runner, "proton_name": picked[0], "proton_path": str(picked[1])})
+    return entry
+
 def add_script():
     """Add a new script"""
     exe_path = filedialog.askopenfilename(
@@ -5247,46 +5630,68 @@ def add_script():
     exe_resolved = exe_path_obj.resolve()
     folder_resolved = folder_path.resolve()
 
-    script_content = (
-        "#!/bin/bash\n"
-        f"cd \"{folder_resolved}\"\n"
-        f"wine \"{exe_resolved}\"\n"
-    )
+    # Prefix game ini: ikuti prefix tempat exe-nya terpasang (lokasi default game itu, di disk
+    # mana pun), kecuali pengguna memilih membuat/memakai prefix lain (mis. prefix custom baru).
+    cfg_entry = None
+    status_extra = ""
+    owning = find_owning_prefix(exe_resolved)
+    if owning:
+        answer = messagebox.askyesnocancel(
+            "Prefix Detected",
+            f"'{exe_path_obj.name}' is installed inside an existing prefix:\n"
+            f"{owning['prefix_path']}\n\n"
+            "Yes = use this prefix (recommended - keeps the game's saves & settings)\n"
+            "No = choose another runner/prefix, or create a new custom prefix\n"
+            "Cancel = don't add this game")
+        if answer is None:
+            return
+        if answer:
+            cfg_entry = owning_prefix_to_choice(owning)
+            if cfg_entry is None:
+                return
+            record_prefix_usage(cfg_entry["runner"], cfg_entry["prefix_code"], cfg_entry["prefix_path"],
+                                cfg_entry.get("proton_name"), cfg_entry.get("proton_path"))
+    else:
+        answer = messagebox.askyesnocancel(
+            "Choose Prefix",
+            f"'{exe_path_obj.name}' is not inside any Wine/Proton prefix.\n\n"
+            "Yes = choose runner & prefix now (create a new prefix, pick a custom location, "
+            "or reuse an existing prefix)\n"
+            "No = run with the default Wine prefix (~/.wine)\n"
+            "Cancel = don't add this game")
+        if answer is None:
+            return
+        if not answer:
+            answer = "default"
+    if cfg_entry is None and answer != "default":
+        chosen = ask_runner_choice(parent_script_name=None, purpose="setup", game_title=safe_new_name)
+        if chosen is None:
+            return
+        cfg_entry = dict(chosen)
+        cfg_entry.setdefault("launch_options", "")
+        cfg_entry.setdefault("comment", "")
 
     try:
+        if cfg_entry:
+            script_content = build_script_content(str(folder_resolved), str(exe_resolved), cfg_entry)
+            status_extra = f" (prefix {cfg_entry['prefix_code']})" if cfg_entry.get("prefix_code") else ""
+        else:
+            script_content = (
+                "#!/bin/bash\n"
+                f"cd \"{folder_resolved}\"\n"
+                f"wine \"{exe_resolved}\"\n"
+            )
         with open(script_path, "w") as script_file:
             script_file.write(script_content)
-
         script_path.chmod(0o755)
 
-        owning = find_owning_prefix(exe_resolved)
-        status_extra = ""
-        if owning and (owning["runner"] == "wine" or owning.get("proton_path")):
-            cfg_entry = {
-                "runner": owning["runner"],
-                "prefix_code": owning["prefix_code"],
-                "prefix_path": owning["prefix_path"],
-                "launch_options": "",
-                "comment": ""
-            }
-            if owning["runner"] in ("protonge", "protoncachyos"):
-                cfg_entry["proton_name"] = owning.get("proton_name") or ""
-                cfg_entry["proton_path"] = owning["proton_path"]
-
-            new_script_content = build_script_content(str(folder_resolved), str(exe_resolved), cfg_entry)
-            with open(script_path, "w") as script_file:
-                script_file.write(new_script_content)
-            script_path.chmod(0o755)
-
-            runner_cfg = load_runner_config()
+        runner_cfg = load_runner_config()
+        if cfg_entry:
             runner_cfg[safe_new_name] = cfg_entry
             save_runner_config(runner_cfg)
-            status_extra = f" (linked to existing prefix {owning['prefix_code']})"
-        else:
-            runner_cfg = load_runner_config()
-            if safe_new_name in runner_cfg:
-                del runner_cfg[safe_new_name]
-                save_runner_config(runner_cfg)
+        elif safe_new_name in runner_cfg:
+            del runner_cfg[safe_new_name]
+            save_runner_config(runner_cfg)
 
         update_script_list()
         safe_status_config(text=f"Added: {safe_new_name}{status_extra}", fg=COLORS["success"])
